@@ -237,6 +237,7 @@ def run(
     report_out: str,
     limit=None,
     resume_job: str = "data/job.json",
+    progress=None,
 ) -> dict:
     tracks = _load_json_list(input_json)
     if limit is not None:
@@ -277,6 +278,11 @@ def run(
         _write_json(matched_out, matched)
         _write_json(unmatched_out, unmatched)
         _save_job(resume_job, job)
+        if progress:
+            try:
+                progress(done_count, total)
+            except Exception:
+                pass
 
     try:
         for track in tracks:

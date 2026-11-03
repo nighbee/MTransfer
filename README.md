@@ -4,6 +4,19 @@ One-time migration tool: export your liked tracks from **Yandex Music**, match t
 
 > Stack: **Python CLI + tiny web UI** (FastAPI + MusicKit JS). Windows-compatible. Token/cookie auth (no official Yandex export API, no paid Apple Developer account needed for one-time run).
 
+## Easy way (recommended)
+
+Double-click **`run.bat`** (or `python -m src.web`), open http://127.0.0.1:8000 — a 4-step wizard guides you:
+
+1. **Yandex login** — press "Get login code", enter the code at `ya.ru/device`, press "Export my likes". No token copying.
+2. **Match** — press "Start matching", watch the progress bar. Review low-confidence matches, download the not-found list.
+3. **Apple login** — press "1 · Enable Apple access" (auto), paste `media-user-token` from `beta.music.apple.com` cookies (30-sec how-to is on the page), press "Preview" to see counts.
+4. **Transfer** — set playlist name, press "Start transfer". "Retry failed" and "♥ Add likes only" handle the rest.
+
+No command line needed. Tokens stay in server memory only.
+
+## CLI way
+
 ---
 
 ## EN
@@ -70,7 +83,18 @@ data/           local only, gitignored — exports, match results, reports
 
 > Стек: **Python CLI + крошечный веб-UI** (FastAPI + MusicKit JS). Работает на Windows. Авторизация через токены/куки (официального export API у Яндекса нет, платный Apple Developer для разового переноса не нужен).
 
-### Как это работает
+## Быстрый путь (рекомендуется)
+
+Двойной клик по **`run.bat`** (или `python -m src.web`), открыть http://127.0.0.1:8000 — мастер из 4 шагов проведёт за руку:
+
+1. **Вход в Яндекс** — «Получить код входа», ввести код на `ya.ru/device`, «Выгрузить мои лайки». Ничего копировать не надо.
+2. **Поиск** — «Начать поиск», смотреть прогресс-бар. Проверить сомнительные совпадения, скачать список ненайденного.
+3. **Вход в Apple** — «1 · Включить доступ Apple» (автоматом), вставить `media-user-token` из куки `beta.music.apple.com` (инструкция на 30 сек прямо на странице), «Предпросмотр» покажет цифры.
+4. **Перенос** — задать имя плейлиста, «Начать перенос». «Повторить ошибки» и «♥ Только лайки» доделают остальное.
+
+Командная строка не нужна. Токены живут только в памяти сервера.
+
+## Через командную строку
 
 ```
 [Яндекс: OAuth-токен / cookie] → экспорт лайков → нормализация → матчинг (iTunes Search API)

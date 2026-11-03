@@ -94,11 +94,37 @@ def test_scrape_developer_token_from_fake_beta_bundle():
     assert token.startswith("eyJ")
 
 
+_M62YD_DUD = (
+    "eyJM62YDdWQiOiIxIn0"  # fake prefix mimicking the known-bad M62YD bundle JWT
+    ".eyJkZWYiOiIyIn0.c2lnbmF0dXJlM62YDdWQi"
+)
+
+
 def test_scrape_developer_token_from_js_bundle_text():
-    token = ext.scrape_developer_token(FAKE_JS_BUNDLE)
+    # Shortest valid JWT wins; the long M62YD dud is skipped even though longer.
+    dud = "eyJM62YD" + "x" * 120 + "." + "y" * 80 + "." + "z" * 80
+    bundle = FAKE_JS_BUNDLE + f'var DUD="{dud}";'
+    token = ext.scrape_developer_token(bundle)
     assert token == FAKE_JWT
-    # longest match wins (not the short decoy)
-    assert token != FAKE_JWT_SHORT
+    assert FAKE_JWT_SHORT not in token
+
+
+def test_scrape_prefers_shortest_and_skips_m62yd():
+    short = _fake_jwt("SHORT", sig_len=60)
+    long_dud = "eyJM62YD" + "x" * 60 + "." + "y" * 40 + "." + "z" * 80
+    token = ext.scrape_developer_token(f"a={long_dud};b={short};")
+    assert token == short
+
+
+def test_web_headers_sent_on_amp_requests():
+    # Regression: amp-api 401s without Origin — headers must include it.
+    assert "Origin" in ext.WEB_HEADERS
+    assert ext.WEB_HEADERS["Origin"] == "https://beta.music.apple.com"
+    from src import import_apple as imp
+
+    h = imp._headers("dev123456789", "user123456789")
+    assert "Origin" in h
+    assert h["Authorization"].startswith("Bearer ")
 
 
 def test_scrape_developer_token_not_found():
@@ -353,20 +379,23 @@ def test_add_tracks_chunks_le_50():
     assert res["failed"] == []
 
 
-def test_set_favorites_chunks_le_50():
-    ids = [f"s{i}" for i in range(55)]
-    seen: list[int] = []
+def test_set_favorites_one_put_per_track():
+    # Correct endpoint: PUT /v1/me/ratings/songs/{id} (bulk returns 405).
+    ids = [f"s{i}" for i in range(5)]
+    seen: list = []
 
     def fake_retry(method, url, **kwargs):
         assert method == "PUT"
-        seen.append(len((kwargs.get("json_data") or {}).get("data", [])))
-        assert seen[-1] <= 50
+        seen.append(url)
+        body = kwargs.get("json_data") or {}
+        assert body == {"attributes": {"value": 1}}
         return FakeResponse(200, {})
 
     with mock.patch.object(imp, "_request_with_retry", side_effect=fake_retry):
         res = imp.set_favorites("D", "U", ids)
-    assert seen == [50, 5]
-    assert len(res["added"]) == 55
+    assert len(seen) == 5
+    assert all(u.endswith(f"/ratings/songs/{i}") for u, i in zip(seen, ids))
+    assert len(res["added"]) == 5
 
 
 def test_get_storefront_parses_id():

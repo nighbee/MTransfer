@@ -16,6 +16,7 @@ from src.models import Track
 from src.yandex_client import (
     YandexAuthError,
     fetch_track_details,
+    fetch_tracks_batch,
     get_client,
     iter_liked_raw,
 )
@@ -69,25 +70,26 @@ def test_fetch_track_details_flat_variants():
     assert track.cover_url == "https://example.com/cover.jpg"
 
 
-def test_iter_liked_raw_combines_pages():
+def test_iter_liked_raw_single_call_no_pagination():
+    # Real API: ONE call with NO args returns all likes (TracksList/bare list).
     raw1 = {"id": "1", "title": "One", "artists": ["A"], "album": "Al",
             "duration_ms": 1000, "cover_url": ""}
     raw2 = {"id": "2", "title": "Two", "artists": ["B"], "album": "Al",
             "duration_ms": 2000, "cover_url": ""}
-    raw3 = {"id": "3", "title": "Three", "artists": ["C"], "album": "Al",
-            "duration_ms": 3000, "cover_url": ""}
-    pages = {0: [raw1, raw2], 1: [raw3]}
-
-    def fake(*args, **kwargs):
-        page = kwargs.get("page", args[0] if args else 0)
-        return pages.get(page, [])
-
     client = mock.MagicMock()
-    client.users_likes_tracks.side_effect = fake
+    client.users_likes_tracks.return_value = [raw1, raw2]
 
     got = list(iter_liked_raw(client, page_size=2))
-    assert got == [raw1, raw2, raw3]
-    assert client.users_likes_tracks.call_count >= 2
+    assert got == [raw1, raw2]
+    # Must be called without pagination kwargs — the real API rejects them.
+    client.users_likes_tracks.assert_called_once_with()
+
+
+def test_iter_liked_raw_passes_no_pagination_args_even_with_page_size():
+    client = mock.MagicMock()
+    client.users_likes_tracks.return_value = []
+    assert list(iter_liked_raw(client, page_size=100)) == []
+    client.users_likes_tracks.assert_called_once_with()
 
 
 def test_iter_liked_raw_supports_bare_list_and_attr_shape():
@@ -143,6 +145,95 @@ def test_save_json_csv_roundtrip(tmp_path: Path):
     assert int(rows[0]["duration_ms"]) == 213000
     assert rows[0]["isrc"] == "ISRC1"
     assert rows[0]["cover_url"] == "https://example.com/a.jpg"
+
+
+def test_fetch_track_details_trackshort_wrapper_enriches_by_bare_id():
+    # TrackShort wrapper with track=None: client.tracks called with BARE id
+    # (no ":album_id" suffix).
+    seen = {}
+
+    class FakeShort:
+        id = "123:456"
+        album_id = "456"
+        track = None
+
+    def fake_tracks(ids):
+        seen["ids"] = ids
+        return [{"id": "123", "title": "Enriched Song", "artists": [{"name": "A"}],
+                 "albums": [{"title": "Al"}], "duration_ms": 200000}]
+
+    client = mock.MagicMock()
+    client.tracks.side_effect = fake_tracks
+    track = fetch_track_details(client, FakeShort())
+    assert seen["ids"] == ["123"]
+    assert track.title == "Enriched Song"
+    assert track.artists == ["A"]
+    assert track.yandex_id == "123"
+
+
+def test_fetch_tracks_batch_strips_album_suffix_and_maps():
+    seen = {}
+
+    def fake_tracks(ids):
+        seen["ids"] = ids
+        return [
+            {"id": "123", "title": "A", "artists": [{"name": "X"}],
+             "duration_ms": 1000},
+            {"id": "456", "title": "B", "artists": [], "duration_ms": 2000},
+        ]
+
+    client = mock.MagicMock()
+    client.tracks.side_effect = fake_tracks
+    out = fetch_tracks_batch(client, ["123:999", "456:999"])
+    assert seen["ids"] == ["123", "456"]
+    assert set(out) == {"123", "456"}
+    assert out["123"]["title"] == "A"
+
+
+def test_fetch_tracks_batch_failure_returns_empty():
+    client = mock.MagicMock()
+    client.tracks.side_effect = Exception("boom")
+    assert fetch_tracks_batch(client, ["1", "2"]) == {}
+
+
+def test_export_likes_batches_one_call_per_batch():
+    raws = [{"id": f"{i}", "title": f"T{i}"} for i in range(5)]
+    client = mock.MagicMock()
+    calls = []
+
+    def fake_batch(c, ids):
+        calls.append(list(ids))
+        return {str(i): {"id": str(i), "title": f"Song{i}",
+                         "artists": ["A"], "duration_ms": 1000}
+                for i in ids}
+
+    with mock.patch.object(export_yandex, "iter_liked_raw",
+                           return_value=iter(raws)), \
+         mock.patch.object(export_yandex, "fetch_tracks_batch",
+                           side_effect=fake_batch):
+        tracks = export_yandex.export_likes(client, delay=0, batch_size=2)
+    assert len(tracks) == 5
+    assert calls == [["0", "1"], ["2", "3"], ["4"]]
+    assert all(t.title.startswith("Song") for t in tracks)
+
+
+def test_export_likes_checkpoint_called_per_batch():
+    raws = [{"id": f"{i}", "title": f"T{i}"} for i in range(4)]
+    client = mock.MagicMock()
+    seen = []
+
+    def fake_batch(c, ids):
+        return {str(i): {"id": str(i), "title": f"S{i}"} for i in ids}
+
+    with mock.patch.object(export_yandex, "iter_liked_raw",
+                           return_value=iter(raws)), \
+         mock.patch.object(export_yandex, "fetch_tracks_batch",
+                           side_effect=fake_batch):
+        tracks = export_yandex.export_likes(
+            client, delay=0, batch_size=2,
+            checkpoint=lambda ts: seen.append(len(ts)))
+    assert seen == [2, 4]
+    assert len(tracks) == 4
 
 
 def test_401_iter_raises_clean_auth_error_without_token_leak():

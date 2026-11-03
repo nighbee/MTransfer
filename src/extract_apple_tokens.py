@@ -27,6 +27,21 @@ except ImportError:  # pragma: no cover - requirements always include requests
 
 AMP_BASE = "https://amp-api.music.apple.com"
 BETA_URL = "https://beta.music.apple.com/"
+WEB_ORIGIN = "https://beta.music.apple.com"
+
+# Headers browsers send with amp-api calls. REQUIRED: without Origin,
+# amp-api returns 401 for every request (even with valid tokens).
+WEB_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Origin": WEB_ORIGIN,
+    "Referer": WEB_ORIGIN + "/",
+}
+
+JWT_RE_EXCLUDES = ("M62YD",)  # known non-API JWT prefixes in web bundles
 
 # JWT: eyJ<header>.<payload>.<signature> (base64url, no whitespace)
 _JWT_RE = re.compile(r"eyJ[A-Za-z0-9_\-=]+\.[A-Za-z0-9_\-=]+\.[A-Za-z0-9_\-_=]+")
@@ -62,8 +77,11 @@ def redact(token: str | None) -> str:
 def scrape_developer_token(html: str) -> str:
     """Extract the Developer JWT from HTML/JS bundle text.
 
-    Finds all JWT-looking substrings and returns the longest one
-    (real Developer JWTs are long; avoids short false positives).
+    The web bundles contain several JWT-looking strings, but only the
+    ~268-char web-playback tokens work with amp-api (iss AMPWebPlay /
+    5IKPP2IECQ). A longer 298-char token (iss M62YD85FTQ) is present too
+    but is rejected with 401 — so prefer the SHORTEST valid-looking JWT,
+    skipping known-bad prefixes.
     Raises ValueError when nothing is found.
     """
     if not html:
@@ -71,12 +89,16 @@ def scrape_developer_token(html: str) -> str:
     matches = _JWT_RE.findall(html)
     if not matches:
         raise ValueError("Developer token (JWT) not found in bundle")
-    # Longest match wins; ties -> first occurrence.
-    best = max(matches, key=len)
     # Strip trailing punctuation that sometimes sticks to tokens in JS.
-    best = best.rstrip(";,\"'\\")
-    if len(best) < 20:
+    cleaned = [m.rstrip(";,\"'\\") for m in matches]
+    cleaned = [m for m in cleaned if len(m) >= 100]
+    if not cleaned:
         raise ValueError("Developer token (JWT) not found in bundle")
+    # Prefer candidates WITHOUT known-bad prefixes (M62YD... is 401).
+    good = [m for m in cleaned if not m.startswith(JWT_RE_EXCLUDES)]
+    pool = good or cleaned
+    # Shortest wins: the working web token is 268 chars, the dud is 298.
+    best = min(pool, key=len)
     return best
 
 
@@ -169,12 +191,15 @@ def verify_tokens(dev_token: str, user_token: str, storefront: str = "us") -> bo
 
     Returns True on HTTP 200, False otherwise (401/403/network-after-retry).
     Never logs token values (redacted to 6 chars).
+    Browsers always send Origin/Referer — without them amp-api returns 401
+    even for valid tokens, so WEB_HEADERS are merged in.
     """
     url = f"{AMP_BASE}/v1/me/storefront"
     headers = {
         "Authorization": f"Bearer {dev_token}",
         "Media-User-Token": user_token,
         "Accept": "application/json",
+        **WEB_HEADERS,
     }
     logger.info("Verifying Apple tokens (dev=%s user=%s)", redact(dev_token), redact(user_token))
     try:
@@ -191,7 +216,7 @@ def verify_tokens(dev_token: str, user_token: str, storefront: str = "us") -> bo
 
 def fetch_developer_token_from_web(beta_url: str = BETA_URL, max_scripts: int = 8) -> str:
     """Fetch beta.music.apple.com + its JS bundles and scrape the JWT."""
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) MTransfer/0.1"}
+    headers = dict(WEB_HEADERS)
     resp = _request_with_retry("GET", beta_url, headers=headers, timeout=20)
     if resp.status_code != 200:
         raise RuntimeError(

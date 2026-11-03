@@ -25,6 +25,20 @@ except ImportError:  # pragma: no cover
 AMP_BASE = "https://amp-api.music.apple.com"
 BATCH_SIZE = 50
 
+# Same browser headers as extract_apple_tokens: amp-api 401s without Origin.
+try:
+    from src.extract_apple_tokens import WEB_HEADERS
+except Exception:  # pragma: no cover - standalone use
+    WEB_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Origin": "https://beta.music.apple.com",
+        "Referer": "https://beta.music.apple.com/",
+    }
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,6 +105,7 @@ def _headers(dev_token: str, user_token: str) -> dict:
         "Media-User-Token": user_token,
         "Accept": "application/json",
         "Content-Type": "application/json",
+        **WEB_HEADERS,
     }
 
 
@@ -256,31 +271,30 @@ def add_tracks(
 
 
 def set_favorites(dev_token: str, user_token: str, track_ids: list[str]) -> dict:
-    """Mark song ids as favorites (PUT ratings) in chunks of <=50."""
+    """Mark song ids as favorites.
+
+    Correct endpoint (probed 2026-11-03): one PUT per track to
+    ``/v1/me/ratings/songs/{id}`` with body ``{"attributes": {"value": 1}}``.
+    The bulk ``PUT /v1/me/ratings/songs`` returns 405 — not supported.
+    """
     added: list[str] = []
     failed: list[dict] = []
     ids = [str(t) for t in (track_ids or []) if str(t)]
-    if not ids:
-        return {"added": [], "failed": []}
-    for chunk in _chunks(ids, BATCH_SIZE):
-        assert len(chunk) <= BATCH_SIZE, "chunk exceeds Apple batch limit"
-        url = f"{AMP_BASE}/v1/me/ratings/songs"
-        body = {
-            "data": [{"id": tid, "type": "songs", "attributes": {"value": 1}} for tid in chunk]
-        }
+    for tid in ids:
+        url = f"{AMP_BASE}/v1/me/ratings/songs/{tid}"
+        body = {"attributes": {"value": 1}}
         try:
             resp = _request_with_retry(
-                "PUT", url, headers=_headers(dev_token, user_token), json_data=body, timeout=15
+                "PUT", url, headers=_headers(dev_token, user_token),
+                json_data=body, timeout=15,
             )
         except Exception as exc:
-            for tid in chunk:
-                failed.append({"apple_id": tid, "reason": f"request-error: {exc}"})
+            failed.append({"apple_id": tid, "reason": f"request-error: {exc}"})
             continue
         if resp.status_code in (200, 201, 202, 204):
-            added.extend(chunk)
+            added.append(tid)
         else:
-            for tid in chunk:
-                failed.append({"apple_id": tid, "reason": f"HTTP {resp.status_code}"})
+            failed.append({"apple_id": tid, "reason": f"HTTP {resp.status_code}"})
     return {"added": added, "failed": failed}
 
 

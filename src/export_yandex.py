@@ -24,6 +24,7 @@ from src.models import Track
 from src.yandex_client import (
     YandexAuthError,
     fetch_track_details,
+    fetch_tracks_batch,
     get_client,
     iter_liked_raw,
 )
@@ -42,13 +43,50 @@ def _redact(text: str) -> str:
     return text
 
 
-def export_likes(client, delay: float = 0.3, limit: Optional[int] = None) -> List[Track]:
-    """Fetch liked tracks via the adapter and map them to :class:`Track`."""
+def _raw_id(raw) -> str:
+    if isinstance(raw, dict):
+        return str(raw.get("yandex_id") or raw.get("id") or "")
+    rid = getattr(raw, "id", "")
+    if rid:
+        return str(rid)
+    return str(raw or "")
+
+
+def export_likes(client, delay: float = 0.3, limit: Optional[int] = None,
+                 batch_size: int = 100, progress=None,
+                 checkpoint=None) -> List[Track]:
+    """Fetch liked tracks, resolving details in batches of ``batch_size``.
+
+    ``progress(done, total_or_None)`` is called after each batch.
+    ``checkpoint(tracks_so_far)`` is called after each batch so the caller
+    can persist incrementally (survives Ctrl+C / network drops).
+    """
+    raws = list(iter_liked_raw(client))
+    if limit is not None:
+        raws = raws[:limit]
     tracks: List[Track] = []
-    for raw in iter_liked_raw(client):
-        if limit is not None and len(tracks) >= limit:
-            break
-        tracks.append(fetch_track_details(client, raw))
+    total = len(raws)
+    for start in range(0, len(raws), max(1, batch_size)):
+        chunk = raws[start:start + max(1, batch_size)]
+        ids = [_raw_id(r) for r in chunk]
+        details = fetch_tracks_batch(client, ids)
+        for raw in chunk:
+            bid = _raw_id(raw).split(":")[0].strip()
+            hit = details.get(bid)
+            if hit is not None:
+                tracks.append(fetch_track_details(client, hit))
+            else:
+                tracks.append(fetch_track_details(client, raw))
+        if progress:
+            try:
+                progress(len(tracks), total)
+            except Exception:
+                pass
+        if checkpoint:
+            try:
+                checkpoint(list(tracks))
+            except Exception:
+                pass
         if delay and delay > 0:
             time.sleep(delay)
     return tracks
@@ -97,9 +135,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=None,
                    help="Export at most N tracks (smoke tests).")
     p.add_argument("--delay", type=float, default=0.3,
-                   help="Polite delay in seconds between track fetches.")
-    p.add_argument("--page-size", type=int, default=100,
-                   help="Likes pagination page size.")
+                   help="Polite delay in seconds between batches.")
+    p.add_argument("--batch-size", type=int, default=100,
+                   help="Track-detail batch size (one API call per batch).")
+    p.add_argument("--resume", action="store_true",
+                   help="Resume: skip yandex_ids already present in out-json.")
     return p
 
 
@@ -107,7 +147,18 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     token = args.token or os.environ.get("YANDEX_MUSIC_TOKEN", "")
     if not token:
-        print("Error: no Yandex token. Pass --token or set YANDEX_MUSIC_TOKEN.",
+        # Fall back to the device-flow token file (src.yandex_login --save).
+        for candidate in (".yandex_token",
+                          str(Path(__file__).resolve().parent.parent / ".yandex_token")):
+            try:
+                token = Path(candidate).read_text(encoding="utf-8").strip()
+                if token:
+                    break
+            except OSError:
+                continue
+    if not token:
+        print("Error: no Yandex token. Pass --token, set YANDEX_MUSIC_TOKEN, "
+              "or run: python -m src.yandex_login",
               file=sys.stderr)
         return 2
     try:
@@ -122,19 +173,78 @@ def main(argv=None) -> int:
     try:
         if args.verify_only:
             count = 0
-            for raw in iter_liked_raw(client, page_size=args.page_size):
-                fetch_track_details(client, raw)
+            for _raw in iter_liked_raw(client):
                 count += 1
                 if args.limit is not None and count >= args.limit:
                     break
             print(f"Found {count} liked track(s) (verify-only, no files written).")
             return 0
 
-        # Re-iterate via export_likes for the real dump (keeps one code path).
-        # iter_liked_raw returns a fresh generator each call, so this is safe
-        # for real clients; tests mock at this seam as well.
-        tracks = export_likes(client, delay=args.delay, limit=args.limit)
+        done_ids: set = set()
+        if args.resume:
+            try:
+                with open(args.out_json, encoding="utf-8") as f:
+                    for entry in json.load(f):
+                        if isinstance(entry, dict) and entry.get("yandex_id"):
+                            done_ids.add(str(entry["yandex_id"]))
+                print(f"Resume: {len(done_ids)} track(s) already exported, skipping.")
+            except (OSError, ValueError):
+                pass
+            if done_ids:
+                # Skip already-done ids inside export by pre-seeding: wrap
+                # iter_liked_raw via a filtering generator.
+                _orig_iter = iter_liked_raw
+
+                def _filtered(client, page_size: int = 100):
+                    for raw in _orig_iter(client, page_size=page_size):
+                        rid = _raw_id(raw).split(":")[0].strip()
+                        if rid not in done_ids:
+                            yield raw
+
+                globals()["iter_liked_raw"] = _filtered
+                _self_iter = _orig_iter
+
+        def show_progress(done: int, total) -> None:
+            print(f"  ... {done}/{total} tracks", flush=True)
+
+        def checkpoint(tracks: list) -> None:
+            if args.resume:
+                save_tracks(tracks, args.out_json, args.out_csv)
+            else:
+                save_tracks(tracks, args.out_json + ".part", args.out_csv + ".part")
+
+        tracks = export_likes(client, delay=args.delay, limit=args.limit,
+                              batch_size=args.batch_size,
+                              progress=show_progress, checkpoint=checkpoint)
+        if args.resume and done_ids:
+            globals()["iter_liked_raw"] = _self_iter
+            # Merge previously exported entries back in.
+            try:
+                with open(args.out_json, encoding="utf-8") as f:
+                    old = json.load(f)
+                seen = {t.yandex_id for t in tracks}
+                for entry in old:
+                    if (isinstance(entry, dict) and entry.get("yandex_id")
+                            and str(entry["yandex_id"]) not in seen):
+                        tracks.append(Track(
+                            source=entry.get("source", "yandex"),
+                            yandex_id=str(entry["yandex_id"]),
+                            title=entry.get("title", ""),
+                            artists=list(entry.get("artists", []) or []),
+                            album=entry.get("album", ""),
+                            duration_ms=int(entry.get("duration_ms", 0) or 0),
+                            isrc=entry.get("isrc", ""),
+                            cover_url=entry.get("cover_url", ""),
+                        ))
+            except (OSError, ValueError):
+                pass
         save_tracks(tracks, args.out_json, args.out_csv)
+        # Remove partial files from non-resume runs.
+        for part in (args.out_json + ".part", args.out_csv + ".part"):
+            try:
+                Path(part).unlink(missing_ok=True)
+            except OSError:
+                pass
         print(f"Exported {len(tracks)} liked track(s) to "
               f"{args.out_json} and {args.out_csv}.")
         return 0

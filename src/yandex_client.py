@@ -20,6 +20,7 @@ __all__ = [
     "get_client",
     "iter_liked_raw",
     "fetch_track_details",
+    "fetch_tracks_batch",
 ]
 
 
@@ -92,6 +93,9 @@ def get_client(token: str):
         client = Client(token)
         init = getattr(client, "init", None)
         if callable(init):
+            # init() resolves account_status -> account_uid. Without it every
+            # likes call goes out with an empty user id ("invalid uid: 0").
+            # NOTE: the real @log decorator makes init() return None; ignore it.
             init()
         return client
     except YandexAuthError:
@@ -190,46 +194,61 @@ def _coerce_raw(item: Any) -> Dict[str, Any]:
         if isinstance(inner, dict):
             return inner
         return item
-    track_obj = getattr(item, "track", item)
-    if isinstance(track_obj, dict):
-        return track_obj
-    if isinstance(track_obj, str):
-        return {"id": track_obj}
-    return _obj_to_dict(track_obj)
+    # Likes entries are usually TrackShort wrappers holding .track (a full
+    # Track object when pre-fetched, or None). Prefer the nested track,
+    # else fall back to the wrapper's own attrs (id/album_id).
+    # NOTE: getattr(item, "track", item) is a trap — a wrapper whose .track
+    # is None would return None and lose the wrapper attrs. Check explicitly.
+    if not isinstance(item, str) and hasattr(item, "track"):
+        nested = getattr(item, "track")
+        if isinstance(nested, dict):
+            return nested
+        if nested is not None:
+            d = _obj_to_dict(nested)
+            if d.get("title") or d.get("id"):
+                return d
+        return _obj_to_dict(item)
+    if isinstance(item, str):
+        return {"id": item}
+    return _obj_to_dict(item)
 
 
 def iter_liked_raw(client, page_size: int = 100) -> Iterator[Dict[str, Any]]:
-    """Yield raw liked-track dicts, combining paginated pages.
+    """Yield raw liked-track dicts.
 
-    Stops on the first empty page. If consecutive pages are identical (APIs
-    or mocks that ignore pagination), stops after the first copy.
+    The real API returns ALL likes in ONE call (``users_likes_tracks()``
+    -> TracksList, no pagination args). We keep ``page_size`` in the
+    signature for backward-compat with the CLI/tests, but never pass it
+    to the library: passing unknown kwargs (page/page_size) makes the API
+    reject the request ("invalid uid: 0" style errors).
+
+    Also handles mock/bare-list shapes used in tests.
     """
-    method = _likes_method(client)
-    if method is None:
-        raise RuntimeError("Yandex client has no users_likes_tracks method.")
-    page = 0
-    prev_key = None
-    while True:
-        if page > 10000:
-            break
+    try:
+        res = client.users_likes_tracks()
+    except YandexAuthError:
+        raise
+    except TypeError:
+        # Very old/other client shapes that require explicit user id.
+        user_id = getattr(client, "account_uid", None)
         try:
-            res = _fetch_page(client, method, page, page_size)
+            res = client.users_likes_tracks(user_id)
         except YandexAuthError:
             raise
         except Exception as exc:
             if _is_auth_error(exc):
                 raise YandexAuthError(_auth_message()) from None
             raise RuntimeError(_redact(f"Failed to fetch likes page: {exc}")) from None
+    except Exception as exc:
+        if _is_auth_error(exc):
+            raise YandexAuthError(_auth_message()) from None
+        raise RuntimeError(_redact(f"Failed to fetch likes page: {exc}")) from None
+    try:
         items = _page_items(res)
-        if not items:
-            break
-        key = [repr(_coerce_raw(i)) for i in items]
-        if prev_key is not None and key == prev_key:
-            break  # non-paginated source repeating itself
-        prev_key = key
-        for item in items:
-            yield _coerce_raw(item)
-        page += 1
+    except Exception as exc:
+        raise RuntimeError(_redact(f"Failed to parse likes response: {exc}")) from None
+    for item in items:
+        yield _coerce_raw(item)
 
 
 # ---------------------------------------------------------------------------
@@ -336,13 +355,18 @@ def _cover_url(raw: Dict[str, Any]) -> str:
 
 def _try_enrich_by_id(client, track_id: str) -> Optional[Dict[str, Any]]:
     fetcher = getattr(client, "tracks", None)
-    if not callable(fetcher):
+    if not callable(fetcher) or not track_id:
+        return None
+    # TrackShort ids from likes look like "id:album_id" — strip the album part:
+    # client.tracks() expects a bare track id.
+    bare = str(track_id).split(":")[0].strip()
+    if not bare:
         return None
     try:
         try:
-            res = fetcher([track_id])
+            res = fetcher([bare])
         except TypeError:
-            res = fetcher(track_id)
+            res = fetcher(bare)
     except Exception:
         return None
     first = res[0] if isinstance(res, (list, tuple)) and res else res
@@ -356,11 +380,49 @@ def _try_enrich_by_id(client, track_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def fetch_tracks_batch(client, track_ids: list) -> Dict[str, Dict[str, Any]]:
+    """Fetch many full track dicts in ONE API call.
+
+    Returns {bare_id: raw_dict} for every id the API resolved. Accepts
+    "id:album_id" style ids (album suffix stripped). Never raises: per-call
+    failures return {} and the caller falls back to per-track lookup.
+    """
+    fetcher = getattr(client, "tracks", None)
+    if not callable(fetcher):
+        return {}
+    bare_ids: list = []
+    for tid in track_ids or []:
+        bare = str(tid or "").split(":")[0].strip()
+        if bare and bare not in bare_ids:
+            bare_ids.append(bare)
+    if not bare_ids:
+        return {}
+    try:
+        try:
+            res = fetcher(bare_ids)
+        except TypeError:
+            res = fetcher(",".join(bare_ids))
+    except Exception:
+        return {}
+    items = res if isinstance(res, (list, tuple)) else [res]
+    out: Dict[str, Dict[str, Any]] = {}
+    for item in items:
+        raw = item if isinstance(item, dict) else _obj_to_dict(item)
+        if not isinstance(raw, dict):
+            continue
+        bid = str(raw.get("id", "") or "").split(":")[0].strip()
+        if bid and (raw.get("title") or raw.get("id")):
+            out[bid] = raw
+    return out
+
+
 def fetch_track_details(client, raw: Any) -> Track:
     """Map one raw Yandex entry to a canonical :class:`Track`.
 
-    Uses :func:`track_from_dict`; no network call when ``raw`` already
-    carries the fields (extra lookup only for id-only dicts).
+    Likes entries are usually TrackShort wrappers holding .track (a full
+    Track when the library pre-fetched it, or None). When the wrapper only
+    carries ``id``/``album_id`` (``track`` is None), do ONE extra lookup via
+    ``client.tracks([bare_id])`` to get title/artists/duration/isrc.
     """
     if raw is None:
         return Track()
@@ -371,8 +433,23 @@ def fetch_track_details(client, raw: Any) -> Track:
         else:
             return Track(yandex_id=raw)
     if not isinstance(raw, dict):
-        track_obj = getattr(raw, "track", raw)
-        raw = track_obj if isinstance(track_obj, dict) else _obj_to_dict(track_obj)
+        # TrackShort-style wrapper: prefer embedded .track, else wrapper attrs.
+        if hasattr(raw, "track"):
+            nested = getattr(raw, "track")
+            if isinstance(nested, dict):
+                raw = nested
+            elif nested is not None:
+                d = _obj_to_dict(nested)
+                raw = d if (d.get("title") or d.get("id")) else _obj_to_dict(raw)
+            else:
+                raw = _obj_to_dict(raw)
+        else:
+            raw = _obj_to_dict(raw)
+        # Wrapper without embedded track: only id/album_id present.
+        if not raw.get("title") and raw.get("id") and client is not None:
+            enriched = _try_enrich_by_id(client, str(raw["id"]))
+            if enriched is not None:
+                raw = enriched
     inner = raw.get("track")
     if isinstance(inner, dict) and not raw.get("title"):
         raw = inner

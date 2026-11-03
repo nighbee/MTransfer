@@ -3,231 +3,454 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MTransfer</title>
+<title>MTransfer — Yandex Music → Apple Music</title>
 <script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js" async></script>
 <style>
-  body { font-family: system-ui, sans-serif; max-width: 960px; margin: 0 auto; padding: 16px; }
-  nav button { margin-right: 8px; }
-  section.screen { display: none; border: 1px solid #ccc; border-radius: 8px; padding: 16px; margin-top: 12px; }
-  section.screen.active { display: block; }
-  table { border-collapse: collapse; width: 100%; margin-top: 12px; }
-  th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
-  tr.conf-high { background: #e6f7e6; }
-  tr.conf-mid { background: #fff8e1; }
-  tr.conf-low { background: #fdecea; }
-  .row { margin: 8px 0; }
-  input[type=password], input[type=text] { width: min(480px, 100%); padding: 6px; }
-  button.primary { padding: 8px 18px; font-size: 1rem; }
-  #status { font-weight: bold; margin: 8px 0; }
-  #langToggle { float: right; }
-  progress { width: 100%; }
-  pre { background: #f6f6f6; padding: 12px; white-space: pre-wrap; }
+  :root {
+    --bg: #f7f7f9; --card: #fff; --accent: #fa2d48; --accent-dark: #d61f38;
+    --ok: #1a7f37; --warn: #9a6700; --bad: #cf222e; --muted: #57606a;
+    --border: #e3e4e8; --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, "Segoe UI", system-ui, sans-serif; background: var(--bg);
+    margin: 0; padding: 24px 16px 64px; color: #1c1e21; }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  header.top { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  header.top .logo { width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg,#ffcf02,#fa2d48);
+    display: flex; align-items: center; justify-content: center; font-size: 24px; }
+  header.top h1 { font-size: 22px; margin: 0; }
+  header.top small { color: var(--muted); }
+  #langToggle { margin-left: auto; border: 1px solid var(--border); background: var(--card);
+    border-radius: 20px; padding: 6px 14px; cursor: pointer; }
+  .steps { display: flex; gap: 8px; margin: 16px 0; }
+  .step-pill { flex: 1; text-align: center; padding: 10px 4px; border-radius: var(--radius);
+    background: var(--card); border: 1px solid var(--border); font-size: 13px; color: var(--muted);
+    cursor: pointer; transition: all .2s; }
+  .step-pill .num { display: inline-flex; width: 22px; height: 22px; border-radius: 50%;
+    background: #eee; align-items: center; justify-content: center; font-size: 12px; margin-right: 4px; }
+  .step-pill.active { border-color: var(--accent); color: #111; box-shadow: 0 0 0 1px var(--accent); }
+  .step-pill.active .num { background: var(--accent); color: #fff; }
+  .step-pill.done { border-color: var(--ok); color: var(--ok); }
+  .step-pill.done .num { background: var(--ok); color: #fff; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 22px; margin-top: 12px; display: none; }
+  .card.active { display: block; }
+  .card h2 { margin: 0 0 4px; font-size: 18px; }
+  .card p.desc { color: var(--muted); margin: 0 0 16px; font-size: 14px; }
+  .bigcode { font-size: 34px; letter-spacing: 6px; font-weight: 700; text-align: center;
+    background: #f0f1f4; border-radius: 10px; padding: 14px; margin: 12px 0; user-select: all; }
+  .btn { display: inline-block; border: none; border-radius: 10px; padding: 12px 22px;
+    font-size: 15px; cursor: pointer; margin: 6px 6px 6px 0; }
+  .btn.primary { background: var(--accent); color: #fff; }
+  .btn.primary:hover { background: var(--accent-dark); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.ghost { background: #eef0f3; color: #111; }
+  .btn.small { padding: 7px 14px; font-size: 13px; }
+  input[type=text], input[type=password] { width: 100%; padding: 10px 12px; border-radius: 10px;
+    border: 1px solid var(--border); font-size: 14px; }
+  .status { margin: 10px 0; font-size: 14px; min-height: 20px; }
+  .status.ok { color: var(--ok); } .status.err { color: var(--bad); }
+  progress { width: 100%; height: 14px; accent-color: var(--accent); }
+  .stat-grid { display: flex; gap: 10px; margin: 14px 0; flex-wrap: wrap; }
+  .stat { flex: 1; min-width: 120px; background: #f6f8fa; border-radius: 10px; padding: 12px; text-align: center; }
+  .stat b { font-size: 24px; display: block; }
+  .stat span { font-size: 12px; color: var(--muted); }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; font-size: 14px; }
+  th, td { border-bottom: 1px solid var(--border); padding: 8px; text-align: left; }
+  tr.conf-high td.conf { color: var(--ok); font-weight: 700; }
+  tr.conf-mid td.conf { color: var(--warn); font-weight: 700; }
+  tr.conf-low td.conf { color: var(--bad); font-weight: 700; }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); }
+  .howto { background: #f6f8fa; border-radius: 10px; padding: 12px 16px; font-size: 13px; margin: 10px 0; }
+  .howto ol { margin: 6px 0; padding-left: 20px; }
+  kbd { background: #e8eaed; border-radius: 4px; padding: 1px 6px; font-size: 12px; }
+  .foot { margin-top: 26px; text-align: center; color: var(--muted); font-size: 12px; }
 </style>
 </head>
 <body>
-<button id="langToggle" onclick="toggleLang()">RU</button>
-<h1>MTransfer</h1>
-<div id="status" role="status"></div>
-<nav>
-  <button data-i18n="nav1" onclick="show(1)">1. Yandex</button>
-  <button data-i18n="nav2" onclick="show(2)">2. Match</button>
-  <button data-i18n="nav3" onclick="show(3)">3. Apple</button>
-  <button data-i18n="nav4" onclick="show(4)">4. Transfer</button>
-</nav>
+<div class="wrap">
+  <header class="top">
+    <div class="logo">🎵</div>
+    <div><h1>MTransfer</h1><small data-i18n="tagline">Move your likes from Yandex Music to Apple Music</small></div>
+    <button id="langToggle" onclick="toggleLang()">RU</button>
+  </header>
 
-<!-- Screen 1: Yandex connect -->
-<section class="screen active" id="s1">
-  <h2 data-i18n="s1title">Connect Yandex</h2>
-  <p data-i18n="s1help">Paste your Yandex OAuth token (oauth.yandex.ru). It stays in memory only.</p>
-  <div class="row">
-    <input type="password" id="ytoken" placeholder="Yandex OAuth token">
-  </div>
-  <div class="row">
-    <button class="primary" data-i18n="test" onclick="yandexTest()">Test</button>
-    <button data-i18n="export" onclick="yandexExport()">Export</button>
-  </div>
-  <p id="yandexCount"></p>
-</section>
+  <div class="steps" id="pills"></div>
 
-<!-- Screen 2: Match -->
-<section class="screen" id="s2">
-  <h2 data-i18n="s2title">Match tracks</h2>
-  <div class="row">
-    <button class="primary" data-i18n="runMatch" onclick="matchRun()">Run matching</button>
-    <a id="unmatchedLink" href="/api/match/unmatched.csv" download="unmatched.csv" data-i18n="dlUnmatched">Download unmatched.csv</a>
-  </div>
-  <p id="matchStatus"></p>
-  <table id="matchTable">
-    <thead><tr><th></th><th data-i18n="colTitle">Title</th><th data-i18n="colArtist">Artist</th><th>Apple ID</th><th data-i18n="colConf">Confidence</th><th data-i18n="colMethod">Method</th></tr></thead>
-    <tbody></tbody>
-  </table>
-  <div class="row"><button data-i18n="continue" onclick="show(3)">Continue</button></div>
-</section>
+  <!-- STEP 1: Yandex -->
+  <section class="card active" id="s1">
+    <h2 data-i18n="s1title">1. Connect Yandex Music</h2>
+    <p class="desc" data-i18n="s1desc">No tokens to copy — just confirm a code on Yandex's site.</p>
+    <div id="yandexIdle">
+      <button class="btn primary" data-i18n="s1start" onclick="yandexStart()">Get login code</button>
+    </div>
+    <div id="yandexCode" style="display:none">
+      <p data-i18n="s1instr">Open this page and enter the code:</p>
+      <p><a id="yandexUrl" href="#" target="_blank" rel="noopener">ya.ru/device</a></p>
+      <div class="bigcode" id="yandexUserCode">······</div>
+      <p class="status" id="yandexWait">…</p>
+    </div>
+    <div id="yandexDone" style="display:none">
+      <p class="status ok" id="yandexLogin"></p>
+      <button class="btn primary" data-i18n="s1export" onclick="yandexExportJob()">Export my likes</button>
+    </div>
+    <div class="status" id="yandexStatus"></div>
+    <progress id="yandexProg" value="0" max="100" style="display:none"></progress>
+    <div class="stat-grid" id="yandexStats" style="display:none">
+      <div class="stat"><b id="stExported">0</b><span data-i18n="stExported">tracks exported</span></div>
+    </div>
+  </section>
 
-<!-- Screen 3: Apple connect -->
-<section class="screen" id="s3">
-  <h2 data-i18n="s3title">Connect Apple Music</h2>
-  <p data-i18n="s3help">Sign in with Apple Music (MusicKit authorize). The user token is kept in server memory only.</p>
-  <div class="row">
-    <button class="primary" data-i18n="appleSignIn" onclick="appleAuthorize()">Sign in with Apple Music</button>
-    <span id="appleStatus"></span>
-  </div>
-  <div class="row">
-    <button data-i18n="dryRun" onclick="dryRun()">Dry-run</button>
-  </div>
-  <p id="dryRunOut"></p>
-</section>
+  <!-- STEP 2: Match -->
+  <section class="card" id="s2">
+    <h2 data-i18n="s2title">2. Match with Apple catalog</h2>
+    <p class="desc" data-i18n="s2desc">We find each track in Apple Music. Takes ~3 sec per track.</p>
+    <button class="btn primary" data-i18n="s2run" onclick="matchStart()">Start matching</button>
+    <progress id="matchProg" value="0" max="100" style="display:none"></progress>
+    <div class="status" id="matchStatus"></div>
+    <div class="stat-grid" id="matchStats" style="display:none">
+      <div class="stat"><b id="stMatched">0</b><span data-i18n="stMatched">found</span></div>
+      <div class="stat"><b id="stReview">0</b><span data-i18n="stReview">to review</span></div>
+      <div class="stat"><b id="stMiss">0</b><span data-i18n="stMiss">not found</span></div>
+    </div>
+    <div>
+      <button class="btn ghost small" data-i18n="showTable" onclick="toggleTable()">Show details</button>
+      <a id="unmatchedLink" href="/api/match/unmatched.csv" download="unmatched.csv" data-i18n="dlUnmatched">Download not-found list (.csv)</a>
+    </div>
+    <div id="tableWrap" style="display:none">
+      <table id="matchTable"><thead><tr>
+        <th data-i18n="colTitle">Title</th><th data-i18n="colArtist">Artist</th>
+        <th data-i18n="colConf">Match</th><th></th>
+      </tr></thead><tbody></tbody></table>
+    </div>
+  </section>
 
-<!-- Screen 4: Transfer -->
-<section class="screen" id="s4">
-  <h2 data-i18n="s4title">Transfer</h2>
-  <progress id="prog" value="0" max="100"></progress>
-  <div class="row">
-    <button class="primary" data-i18n="startImport" onclick="importRun()">Start import</button>
-    <button data-i18n="retry" onclick="importRetry()">Retry failed</button>
-  </div>
-  <pre id="report"></pre>
-</section>
+  <!-- STEP 3: Apple -->
+  <section class="card" id="s3">
+    <h2 data-i18n="s3title">3. Connect Apple Music</h2>
+    <p class="desc" data-i18n="s3desc">Two quick taps — no developer account needed.</p>
+    <div class="row">
+      <button class="btn primary" data-i18n="s3dev" onclick="appleDev()">1 · Enable Apple access</button>
+      <span class="status" id="devStatus"></span>
+    </div>
+    <div class="howto">
+      <b data-i18n="s3howTitle">Then get your user key (30 seconds):</b>
+      <ol>
+        <li><span data-i18n="s3how1">Open</span> <a href="https://beta.music.apple.com" target="_blank" rel="noopener">beta.music.apple.com</a> <span data-i18n="s3how2">and sign in</span></li>
+        <li><span data-i18n="s3how3">Press</span> <kbd>F12</kbd> → <span data-i18n="s3how4">Application → Cookies → copy</span> <kbd>media-user-token</kbd></li>
+        <li><span data-i18n="s3how5">Paste it below and press Save</span></li>
+      </ol>
+      <input type="password" id="appleUserToken" data-i18n-ph="s3paste" placeholder="Paste media-user-token here">
+      <div><button class="btn ghost small" data-i18n="save" onclick="appleUserSave()">2 · Save my key</button>
+      <span class="status" id="appleStatus"></span></div>
+    </div>
+    <div>
+      <button class="btn ghost" data-i18n="dryRun" onclick="dryRun()">Preview: what will be added?</button>
+      <p class="status" id="dryRunOut"></p>
+    </div>
+  </section>
+
+  <!-- STEP 4: Transfer -->
+  <section class="card" id="s4">
+    <h2 data-i18n="s4title">4. Transfer</h2>
+    <p class="desc" data-i18n="s4desc">Creates a playlist and adds every matched track.</p>
+    <div>
+      <label data-i18n="plName">Playlist name</label><br>
+      <input type="text" id="playlistName" value="YM-port">
+    </div>
+    <div style="margin-top:10px">
+      <button class="btn primary" data-i18n="startImport" onclick="importStart()">Start transfer</button>
+      <button class="btn ghost" data-i18n="retry" onclick="importRetry()">Retry failed</button>
+      <button class="btn ghost" data-i18n="favOnly" onclick="favoritesStart()">♥ Add likes only</button>
+    </div>
+    <progress id="importProg" value="0" max="100" style="display:none"></progress>
+    <div class="status" id="importStatus"></div>
+    <pre id="report" style="display:none"></pre>
+  </section>
+
+  <div class="foot">MTransfer · tokens stay in server memory only, never saved to disk</div>
+</div>
 
 <script>
 var LANG = 'en';
 var STRINGS = {
   en: {
-    nav1: '1. Yandex', nav2: '2. Match', nav3: '3. Apple', nav4: '4. Transfer',
-    s1title: 'Connect Yandex', s1help: 'Paste your Yandex OAuth token (oauth.yandex.ru). It stays in memory only.',
-    test: 'Test', export: 'Export',
-    s2title: 'Match tracks', runMatch: 'Run matching', dlUnmatched: 'Download unmatched.csv',
-    colTitle: 'Title', colArtist: 'Artist', colConf: 'Confidence', colMethod: 'Method',
-    continue: 'Continue',
-    s3title: 'Connect Apple Music', s3help: 'Sign in with Apple Music (MusicKit authorize). The user token is kept in server memory only.',
-    appleSignIn: 'Sign in with Apple Music', dryRun: 'Dry-run',
-    s4title: 'Transfer', startImport: 'Start import', retry: 'Retry failed'
+    tagline: 'Move your likes from Yandex Music to Apple Music',
+    steps: ['Yandex login', 'Match', 'Apple login', 'Transfer'],
+    s1title: '1. Connect Yandex Music', s1desc: 'No tokens to copy — just confirm a code on Yandex\u2019s site.',
+    s1start: 'Get login code', s1instr: 'Open this page and enter the code:',
+    s1waiting: 'Waiting for confirmation in browser…', s1hi: 'Hello',
+    s1export: 'Export my likes', stExported: 'tracks exported',
+    s2title: '2. Match with Apple catalog', s2desc: 'We find each track in Apple Music. Takes ~3 sec per track.',
+    s2run: 'Start matching', stMatched: 'found', stReview: 'to review', stMiss: 'not found',
+    showTable: 'Show details', dlUnmatched: 'Download not-found list (.csv)',
+    colTitle: 'Title', colArtist: 'Artist', colConf: 'Match',
+    s3title: '3. Connect Apple Music', s3desc: 'Two quick taps — no developer account needed.',
+    s3dev: '1 · Enable Apple access',
+    s3howTitle: 'Then get your user key (30 seconds):', s3how1: 'Open', s3how2: 'and sign in',
+    s3how3: 'Press', s3how4: 'Application → Cookies → copy', s3how5: 'Paste it below and press Save',
+    s3paste: 'Paste media-user-token here', save: '2 · Save my key',
+    dryRun: 'Preview: what will be added?',
+    s4title: '4. Transfer', s4desc: 'Creates a playlist and adds every matched track.',
+    plName: 'Playlist name', startImport: 'Start transfer', retry: 'Retry failed', favOnly: '♥ Add likes only'
   },
   ru: {
-    nav1: '1. Яндекс', nav2: '2. Сопоставление', nav3: '3. Apple', nav4: '4. Перенос',
-    s1title: 'Подключить Яндекс', s1help: 'Вставьте OAuth-токен Яндекса (oauth.yandex.ru). Он хранится только в памяти.',
-    test: 'Проверить', export: 'Экспорт',
-    s2title: 'Сопоставить треки', runMatch: 'Запустить сопоставление', dlUnmatched: 'Скачать unmatched.csv',
-    colTitle: 'Название', colArtist: 'Исполнитель', colConf: 'Уверенность', colMethod: 'Метод',
-    continue: 'Продолжить',
-    s3title: 'Подключить Apple Music', s3help: 'Войдите через Apple Music (кнопка MusicKit authorize). Токен хранится только в памяти сервера.',
-    appleSignIn: 'Войти через Apple Music', dryRun: 'Пробный запуск',
-    s4title: 'Перенос', startImport: 'Начать импорт', retry: 'Повторить неудачные'
+    tagline: 'Перенос лайков из Яндекс Музыки в Apple Music',
+    steps: ['Вход в Яндекс', 'Поиск', 'Вход в Apple', 'Перенос'],
+    s1title: '1. Подключите Яндекс Музыку', s1desc: 'Ничего копировать не надо — просто подтвердите код на сайте Яндекса.',
+    s1start: 'Получить код входа', s1instr: 'Откройте эту страницу и введите код:',
+    s1waiting: 'Жду подтверждения в браузере…', s1hi: 'Привет',
+    s1export: 'Выгрузить мои лайки', stExported: 'треков выгружено',
+    s2title: '2. Поиск в каталоге Apple', s2desc: 'Ищем каждый трек в Apple Music. Примерно 3 сек на трек.',
+    s2run: 'Начать поиск', stMatched: 'найдено', stReview: 'проверить', stMiss: 'не найдено',
+    showTable: 'Показать детали', dlUnmatched: 'Скачать список ненайденного (.csv)',
+    colTitle: 'Название', colArtist: 'Исполнитель', colConf: 'Совпадение',
+    s3title: '3. Подключите Apple Music', s3desc: 'Два быстрых шага — аккаунт разработчика не нужен.',
+    s3dev: '1 · Включить доступ Apple',
+    s3howTitle: 'Затем получите свой ключ (30 секунд):', s3how1: 'Откройте', s3how2: 'и войдите',
+    s3how3: 'Нажмите', s3how4: 'Application → Cookies → скопируйте', s3how5: 'Вставьте ниже и нажмите Сохранить',
+    s3paste: 'Вставьте сюда media-user-token', save: '2 · Сохранить мой ключ',
+    dryRun: 'Предпросмотр: что будет добавлено?',
+    s4title: '4. Перенос', s4desc: 'Создаёт плейлист и добавляет все найденные треки.',
+    plName: 'Название плейлиста', startImport: 'Начать перенос', retry: 'Повторить ошибки', favOnly: '♥ Только лайки'
   }
 };
+var DONE = { s1: false, s2: false, s3: false, s4: false };
 
-function t(key) { return (STRINGS[LANG] && STRINGS[LANG][key]) || STRINGS.en[key] || key; }
+function t(k) { return (STRINGS[LANG] && STRINGS[LANG][k] !== undefined) ? STRINGS[LANG][k] : (STRINGS.en[k] !== undefined ? STRINGS.en[k] : k); }
 function applyLang() {
   document.querySelectorAll('[data-i18n]').forEach(function (el) {
-    el.textContent = t(el.getAttribute('data-i18n'));
+    var v = t(el.getAttribute('data-i18n'));
+    if (typeof v === 'string') el.textContent = v;
+  });
+  document.querySelectorAll('[data-i18n-ph]').forEach(function (el) {
+    el.placeholder = t(el.getAttribute('data-i18n-ph'));
   });
   document.getElementById('langToggle').textContent = LANG === 'en' ? 'RU' : 'EN';
   document.documentElement.lang = LANG;
+  renderPills();
 }
 function toggleLang() { LANG = (LANG === 'en') ? 'ru' : 'en'; applyLang(); }
-function show(n) {
-  document.querySelectorAll('section.screen').forEach(function (s) { s.classList.remove('active'); });
-  document.getElementById('s' + n).classList.add('active');
+function renderPills() {
+  var names = STRINGS[LANG].steps, ids = ['s1', 's2', 's3', 's4'], html = '';
+  ids.forEach(function (id, i) {
+    var cls = 'step-pill' + (document.getElementById(id).classList.contains('active') ? ' active' : '') + (DONE[id] ? ' done' : '');
+    html += '<div class="' + cls + '" onclick="show(\'' + id + '\')"><span class="num">' + (DONE[id] ? '✓' : (i + 1)) + '</span>' + names[i] + '</div>';
+  });
+  document.getElementById('pills').innerHTML = html;
 }
-function setStatus(msg) { document.getElementById('status').textContent = msg; }
+function show(id) {
+  document.querySelectorAll('.card').forEach(function (s) { s.classList.remove('active'); });
+  document.getElementById(id).classList.add('active');
+  renderPills();
+}
+function markDone(id) { DONE[id] = true; renderPills(); }
+function setStatus(id, msg, cls) {
+  var el = document.getElementById(id);
+  el.textContent = msg;
+  el.className = 'status' + (cls ? ' ' + cls : '');
+}
 async function api(path, opts) {
-  const r = await fetch(path, opts);
-  const body = await r.json().catch(function () { return {}; });
+  var r = await fetch(path, opts);
+  var body = null;
+  try { body = await r.json(); } catch (e) { body = {}; }
   if (!r.ok) throw new Error((body && body.detail) || ('HTTP ' + r.status));
-  return body;
+  return body || {};
 }
-async function yandexTest() {
-  try {
-    const d = await api('/api/yandex/test', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: document.getElementById('ytoken').value }) });
-    document.getElementById('yandexCount').textContent = (d.count || 0) + ' / ' + t('s1title');
-    setStatus('OK: ' + d.count);
-  } catch (e) { setStatus('Error: ' + e.message); }
+function pollJob(jobId, progId, statusId, onDone) {
+  var prog = document.getElementById(progId);
+  prog.style.display = 'block';
+  var timer = setInterval(async function () {
+    try {
+      var j = await api('/api/jobs/' + jobId);
+      var total = j.total || 0, done = j.done || 0;
+      prog.value = total ? Math.round(done / total * 100) : 0;
+      if (j.status === 'done') { clearInterval(timer); prog.value = 100; onDone(j.result || {}); }
+      else if (j.status === 'error') { clearInterval(timer); setStatus(statusId, 'Error: ' + (j.error || 'failed'), 'err'); }
+      else if (total) { setStatus(statusId, done + ' / ' + total); }
+    } catch (e) { clearInterval(timer); setStatus(statusId, 'Error: ' + e.message, 'err'); }
+  }, 1500);
 }
-async function yandexExport() {
-  setStatus('…');
+
+/* Step 1: Yandex device flow */
+var pollTimer = null;
+async function yandexStart() {
+  setStatus('yandexStatus', '…');
   try {
-    const d = await api('/api/yandex/export', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: document.getElementById('ytoken').value }) });
-    document.getElementById('yandexCount').textContent = d.exported;
-    setStatus('OK: ' + d.exported);
-  } catch (e) { setStatus('Error: ' + e.message); }
+    var d = await api('/api/yandex/device/start', { method: 'POST' });
+    document.getElementById('yandexIdle').style.display = 'none';
+    document.getElementById('yandexCode').style.display = 'block';
+    document.getElementById('yandexUrl').href = d.verification_url;
+    document.getElementById('yandexUrl').textContent = d.verification_url.replace('https://', '');
+    document.getElementById('yandexUserCode').textContent = d.user_code;
+    setStatus('yandexWait', t('s1waiting'));
+    pollTimer = setInterval(yandexPollOnce, 3000);
+  } catch (e) { setStatus('yandexStatus', 'Error: ' + e.message, 'err'); }
 }
-function confClass(c) { c = Number(c) || 0; return c >= 0.85 ? 'conf-high' : (c >= 0.6 ? 'conf-mid' : 'conf-low'); }
-async function matchRun() {
-  document.getElementById('matchStatus').textContent = '…';
+async function yandexPollOnce() {
   try {
-    const d = await api('/api/match/run', { method: 'POST',
+    var d = await api('/api/yandex/device/poll', { method: 'POST' });
+    if (d.confirmed) {
+      clearInterval(pollTimer);
+      document.getElementById('yandexCode').style.display = 'none';
+      document.getElementById('yandexDone').style.display = 'block';
+      document.getElementById('yandexLogin').textContent = '✓ ' + t('s1hi') + ', ' + (d.login || '');
+      setStatus('yandexStatus', '');
+      markDoneSoon('s1');
+    }
+  } catch (e) { clearInterval(pollTimer); setStatus('yandexStatus', 'Error: ' + e.message, 'err'); }
+}
+async function yandexExportJob() {
+  setStatus('yandexStatus', '…');
+  try {
+    var d = await api('/api/yandex/export', { method: 'POST',
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-    document.getElementById('matchStatus').textContent = (d.matched || 0) + ' / ' + (d.total || 0);
-    await matchResults();
-  } catch (e) { document.getElementById('matchStatus').textContent = 'Error: ' + e.message; }
+    document.getElementById('stExported').textContent = d.exported;
+    document.getElementById('yandexStats').style.display = 'flex';
+    setStatus('yandexStatus', '✓ ' + d.exported, 'ok');
+    markDone('s1');
+  } catch (e) { setStatus('yandexStatus', 'Error: ' + e.message, 'err'); }
 }
-async function matchResults() {
-  const d = await api('/api/match/results');
-  const tb = document.querySelector('#matchTable tbody');
-  tb.innerHTML = '';
-  (d.matched || []).forEach(function (m) {
-    const tr = document.createElement('tr');
-    tr.className = confClass(m.confidence);
-    tr.innerHTML = '<td><input type="checkbox" checked></td><td></td><td></td><td></td><td></td><td></td>';
-    tr.children[1].textContent = m.title || m.yandex_id || '';
-    tr.children[2].textContent = (m.artists || []).join(', ');
-    tr.children[3].textContent = m.apple_id || '';
-    tr.children[4].textContent = m.confidence;
-    tr.children[5].textContent = m.method || '';
-    tb.appendChild(tr);
-  });
-  (d.unmatched || []).forEach(function (m) {
-    const tr = document.createElement('tr');
-    tr.className = 'conf-low';
-    tr.innerHTML = '<td><input type="checkbox"></td><td></td><td></td><td></td><td></td><td></td>';
-    tr.children[1].textContent = m.title || m.yandex_id || '';
-    tr.children[2].textContent = (m.artists || []).join(', ');
-    tr.children[3].textContent = '';
-    tr.children[4].textContent = m.confidence || 0;
-    tr.children[5].textContent = m.reason || '';
-    tb.appendChild(tr);
-  });
-}
-async function appleAuthorize() {
+function markDoneSoon() {}
+
+/* Step 2: Match */
+async function matchStart() {
+  setStatus('matchStatus', '…');
   try {
-    if (typeof MusicKit === 'undefined') throw new Error('MusicKit JS not loaded (offline?)');
-    await MusicKit.configure({ developerToken: '', app: { name: 'MTransfer', build: '0.1' } }).catch(function () {});
-    const music = MusicKit.getInstance();
-    const userToken = await music.authorize();
-    await api('/api/apple/user-token', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: userToken }) });
-    document.getElementById('appleStatus').textContent = 'OK';
-  } catch (e) { document.getElementById('appleStatus').textContent = 'Error: ' + e.message; }
+    var d = await api('/api/match/run', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    pollJob(d.job_id, 'matchProg', 'matchStatus', function (res) {
+      setStatus('matchStatus', '✓ ' + (res.matched || 0) + ' / ' + (res.total || 0), 'ok');
+      loadStats();
+      markDone('s2');
+    });
+  } catch (e) { setStatus('matchStatus', 'Error: ' + e.message, 'err'); }
+}
+async function loadStats() {
+  try {
+    var d = await api('/api/match/results');
+    var auto = 0, review = 0;
+    (d.matched || []).forEach(function (m) { if ((+m.confidence || 0) >= 0.85) auto++; else review++; });
+    document.getElementById('stMatched').textContent = auto;
+    document.getElementById('stReview').textContent = review;
+    document.getElementById('stMiss').textContent = (d.unmatched || []).length;
+    document.getElementById('matchStats').style.display = 'flex';
+  } catch (e) {}
+}
+function toggleTable() {
+  var w = document.getElementById('tableWrap');
+  w.style.display = w.style.display === 'none' ? 'block' : 'none';
+  if (w.style.display === 'block') fillTable();
+}
+function confClass(c) { c = +c || 0; return c >= 0.85 ? 'conf-high' : (c >= 0.6 ? 'conf-mid' : 'conf-low'); }
+async function fillTable() {
+  try {
+    var d = await api('/api/match/results');
+    var tb = document.querySelector('#matchTable tbody');
+    tb.innerHTML = '';
+    (d.matched || []).slice(0, 200).forEach(function (m) {
+      var tr = document.createElement('tr');
+      tr.className = confClass(m.confidence);
+      var pct = Math.round((+m.confidence || 0) * 100) + '%';
+      tr.innerHTML = '<td></td><td></td><td class="conf"></td><td></td>';
+      tr.children[0].textContent = m.title || m.yandex_id || '';
+      tr.children[1].textContent = (m.artists || []).join(', ');
+      tr.children[2].textContent = pct;
+      tr.children[3].textContent = (+m.confidence || 0) >= 0.85 ? '✓' : '?';
+      tb.appendChild(tr);
+    });
+    (d.unmatched || []).slice(0, 200).forEach(function (m) {
+      var tr = document.createElement('tr');
+      tr.className = 'conf-low';
+      tr.innerHTML = '<td></td><td></td><td class="conf">—</td><td>✗</td>';
+      tr.children[0].textContent = m.title || m.yandex_id || '';
+      tr.children[1].textContent = (m.artists || []).join(', ');
+      tb.appendChild(tr);
+    });
+  } catch (e) {}
+}
+
+/* Step 3: Apple */
+async function appleDev() {
+  setStatus('devStatus', '…');
+  try {
+    await api('/api/apple/dev-token/refresh', { method: 'POST' });
+    try {
+      if (typeof MusicKit !== 'undefined') {
+        var dev = '';
+        await MusicKit.configure({ developerToken: dev, app: { name: 'MTransfer', build: '0.1' } }).catch(function () {});
+      }
+    } catch (e) {}
+    setStatus('devStatus', '✓', 'ok');
+  } catch (e) { setStatus('devStatus', 'Error: ' + e.message, 'err'); }
+}
+async function appleUserSave() {
+  var v = document.getElementById('appleUserToken').value.trim();
+  if (!v) { setStatus('appleStatus', 'Error: empty', 'err'); return; }
+  setStatus('appleStatus', '…');
+  try {
+    var d = await api('/api/apple/user-token', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ token: v }) });
+    document.getElementById('appleUserToken').value = '';
+    setStatus('appleStatus', '✓' + (d.storefront ? ' (' + d.storefront + ')' : ''), 'ok');
+    markDone('s3');
+  } catch (e) { setStatus('appleStatus', 'Error: ' + e.message, 'err'); }
 }
 async function dryRun() {
   try {
-    const d = await api('/api/import/dry-run', { method: 'POST',
+    var d = await api('/api/import/dry-run', { method: 'POST',
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-    document.getElementById('dryRunOut').textContent = JSON.stringify(d);
+    document.getElementById('dryRunOut').textContent = '✓ ' + (d.would_add || 0);
   } catch (e) { document.getElementById('dryRunOut').textContent = 'Error: ' + e.message; }
 }
-async function importRun() {
+
+/* Step 4: Transfer */
+function playlistPayload() {
+  return { playlist: document.getElementById('playlistName').value || 'YM-port' };
+}
+async function importStart() {
+  setStatus('importStatus', '…');
   try {
-    const d = await api('/api/import/run', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-    document.getElementById('prog').value = 100;
-    const r = await api('/api/report');
-    document.getElementById('report').textContent = r.report || JSON.stringify(d);
-  } catch (e) { document.getElementById('report').textContent = 'Error: ' + e.message; }
+    var d = await api('/api/import/run', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(playlistPayload()) });
+    pollJob(d.job_id, 'importProg', 'importStatus', function (res) {
+      setStatus('importStatus', '✓ ' + (res.imported || 0), 'ok');
+      showReport(res);
+      markDone('s4');
+    });
+  } catch (e) { setStatus('importStatus', 'Error: ' + e.message, 'err'); }
 }
 async function importRetry() {
+  setStatus('importStatus', '…');
   try {
-    const d = await api('/api/import/retry', { method: 'POST',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
-    const r = await api('/api/report');
-    document.getElementById('report').textContent = r.report || JSON.stringify(d);
-  } catch (e) { document.getElementById('report').textContent = 'Error: ' + e.message; }
+    var d = await api('/api/import/retry', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(playlistPayload()) });
+    pollJob(d.job_id, 'importProg', 'importStatus', function (res) {
+      setStatus('importStatus', '✓ ' + (res.imported || 0), 'ok');
+      showReport(res);
+    });
+  } catch (e) { setStatus('importStatus', 'Error: ' + e.message, 'err'); }
 }
+async function favoritesStart() {
+  setStatus('importStatus', '…');
+  try {
+    var d = await api('/api/import/favorites', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    pollJob(d.job_id, 'importProg', 'importStatus', function (res) {
+      setStatus('importStatus', '✓ ♥ ' + (res.favorites_set || 0), 'ok');
+    });
+  } catch (e) { setStatus('importStatus', 'Error: ' + e.message, 'err'); }
+}
+async function showReport(res) {
+  try {
+    var r = await api('/api/report');
+    var el = document.getElementById('report');
+    el.style.display = 'block';
+    el.textContent = r.report || JSON.stringify(res, null, 2);
+  } catch (e) {}
+}
+renderPills();
 applyLang();
 </script>
 </body>

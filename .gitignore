@@ -4,6 +4,8 @@
 .media_user_token
 .apple_music_token
 .token
+.yandex_token
+.yandex_device_pending
 
 # Local migration data
 data/*

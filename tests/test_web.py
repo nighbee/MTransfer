@@ -56,18 +56,18 @@ def test_en_ru_strings_both_present(client):
     r = client.get("/")
     assert r.status_code == 200
     html = r.text
-    # EN strings
+    # EN strings (wizard copy)
     assert "Connect Yandex" in html
-    assert "Match tracks" in html or "Run matching" in html
-    assert "Sign in with Apple Music" in html
+    assert "Match with Apple" in html or "Start matching" in html
+    assert "Connect Apple Music" in html
+    assert "Transfer" in html
     # RU strings (JS dict)
-    assert "Подключить" in html or "Яндекс" in html
-    assert "Сопоставить" in html or "Сопоставление" in html
-    # Toggle present
+    assert "Подключите" in html or "Яндекс" in html
+    # Toggle + wizard chrome present
     assert "toggleLang" in html
-    # 4 screens + MusicKit authorize + dry-run + unmatched.csv link
+    # MusicKit + job progress + unmatched.csv link + 4 screens
     assert "musickit" in html.lower()
-    assert "authorize" in html
+    assert "pollJob" in html or "/api/jobs/" in html
     assert "unmatched.csv" in html.lower()
     assert 'id="s1"' in html and 'id="s4"' in html
 
@@ -121,10 +121,108 @@ def test_match_run_mocked(client):
                                          "unmatched": 1}) as m:
         r = client.post("/api/match/run", json={"limit": 5})
     assert r.status_code == 200, r.text
-    assert r.json()["matched"] == 4
+    assert "job_id" in r.json()
+    # background thread runs mocked run() — give it a moment
+    import time as _t
+    for _ in range(50):
+        _t.sleep(0.05)
+        if m.call_count:
+            break
     m.assert_called_once()
     _a, kw = m.call_args
     assert kw.get("limit") == 5
+
+
+def test_match_job_progress_endpoint(client):
+    import time as _t
+    with mock.patch.object(
+            webmod.match_apple, "run",
+            return_value={"total": 2, "matched": 2, "unmatched": 0}):
+        r = client.post("/api/match/run", json={})
+        job_id = r.json()["job_id"]
+        body = {}
+        for _ in range(50):
+            _t.sleep(0.05)
+            jr = client.get(f"/api/jobs/{job_id}")
+            assert jr.status_code == 200
+            body = jr.json()
+            if body["status"] == "done":
+                break
+        assert body["status"] == "done"
+        assert body["result"]["matched"] == 2
+
+
+def test_yandex_device_flow_mocked(client):
+    code = mock.MagicMock()
+    code.verification_url = "https://ya.ru/device"
+    code.user_code = "abc123"
+    code.device_code = "devcode1"
+    token = mock.MagicMock()
+    token.access_token = "YA_TOKEN_abc"
+    fake_client = mock.MagicMock()
+    fake_client.request_device_code.return_value = code
+    fake_client.poll_device_token.return_value = token
+    fake_client.me.account.login = "tester"
+    with mock.patch.dict("sys.modules", {"yandex_music": mock.MagicMock()}):
+        import sys as _sys
+        _sys.modules["yandex_music"].Client.return_value = fake_client
+        r = client.post("/api/yandex/device/start")
+        assert r.status_code == 200, r.text
+        assert r.json()["user_code"] == "abc123"
+        r = client.post("/api/yandex/device/poll")
+        assert r.status_code == 200, r.text
+        assert r.json()["confirmed"] is True
+    from src.web import TOKENS as _TOK
+    assert _TOK.get("yandex") == "YA_TOKEN_abc"
+
+
+def test_apple_dev_token_refresh_mocked(client):
+    with mock.patch.object(webmod.extract_apple_tokens,
+                           "fetch_developer_token_from_web",
+                           return_value="DEV_JWT_fake_123"):
+        r = client.post("/api/apple/dev-token/refresh")
+    assert r.status_code == 200, r.text
+    assert r.json().get("present") is True
+    from src.web import TOKENS as _TOK
+    assert _TOK.get("dev") == "DEV_JWT_fake_123"
+
+
+def test_import_run_mocked(client):
+    with mock.patch.object(
+            webmod.import_apple, "run",
+            return_value={"imported": 3, "skipped": 1, "failed": [],
+                          "total": 4}) as m:
+        r = client.post("/api/import/run", json={})
+    assert r.status_code == 200
+    assert "job_id" in r.json()
+    import time as _t
+    for _ in range(100):
+        _t.sleep(0.05)
+        if m.call_count:
+            break
+    m.assert_called_once()
+
+
+def test_import_favorites_job_mocked(client):
+    with mock.patch.object(webmod.import_apple, "load_matched_entries",
+                           return_value=[{"apple_id": "s1"},
+                                         {"apple_id": "s2"}]), \
+         mock.patch.object(webmod.import_apple, "set_favorites",
+                           return_value={"added": ["s1", "s2"],
+                                         "failed": []}):
+        r = client.post("/api/import/favorites", json={})
+        assert r.status_code == 200
+        job_id = r.json()["job_id"]
+        import time as _t
+        body = {}
+        for _ in range(50):
+            _t.sleep(0.05)
+            jr = client.get(f"/api/jobs/{job_id}")
+            body = jr.json()
+            if body["status"] == "done":
+                break
+        assert body["status"] == "done"
+        assert body["result"]["favorites_set"] == 2
 
 
 def test_match_results_reads_files(client, tmp_path, monkeypatch):
@@ -168,20 +266,31 @@ def test_import_dry_run_returns_counts_without_mutations(client):
 def test_import_run_mocked(client):
     with mock.patch.object(webmod.import_apple, "run",
                            return_value={"imported": 3, "skipped": 1,
-                                         "failed": []}) as m:
+                                         "failed": [], "total": 4}) as m:
         r = client.post("/api/import/run", json={})
     assert r.status_code == 200
-    assert r.json()["imported"] == 3
+    assert "job_id" in r.json()
+    import time as _t
+    for _ in range(50):
+        _t.sleep(0.05)
+        if m.call_count:
+            break
     m.assert_called_once()
 
 
 def test_import_retry_mocked(client):
     with mock.patch.object(webmod.import_apple, "run",
                            return_value={"imported": 1, "skipped": 0,
-                                         "failed": []}) as m:
+                                         "failed": [], "total": 1}) as m:
         r = client.post("/api/import/retry", json={})
     assert r.status_code == 200
-    assert r.json()["imported"] == 1
+    assert "job_id" in r.json()
+    import time as _t
+    for _ in range(50):
+        _t.sleep(0.05)
+        if m.call_count:
+            break
+    m.assert_called_once()
     _a, kw = m.call_args
     assert kw.get("only_failed") is True
 

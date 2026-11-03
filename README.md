@@ -1,21 +1,36 @@
-# MTransfer — Yandex Music → Apple Music
+# MTransfer — Yandex Music → Apple Music (SaaS branch)
 
-**Move your liked tracks AND chosen playlists** from **Yandex Music** to **Apple Music**. Matched against the Apple catalog, imported into your library + playlist(s).
+**Self-hosted web service**: anyone with the link migrates their likes and playlists from **Yandex Music** to **Apple Music** — no accounts, no installs. Each visitor gets an isolated session (own tokens in server memory only, own data dir, 24h TTL).
 
-> Stack: **Python CLI + web UI wizard** (FastAPI + MusicKit JS). Windows-first. Device-code login (no token pasting), auto Apple developer token, background jobs with progress.
+> Branch `saas` = `master` + multi-user sessions + Docker deploy (app + Caddy auto-HTTPS). Single-user local mode still works via `run.bat`.
 
-## Easy way (recommended)
+## Deploy (VPS or home server)
 
-Double-click **`run.bat`** (or `python -m src.web`), open http://127.0.0.1:8000 — a 4-step wizard guides you:
+```bash
+git checkout saas
+# set your domain in Caddyfile (VPS), or use http://<lan-ip> for home LAN
+docker compose up -d --build
+docker compose logs -f app
+```
 
-1. **Yandex login** — press "Get login code", enter the code at `ya.ru/device`, press "Export my likes". No token copying.
-2. **Match** — press "Load my playlists" to tick chosen playlists, or press "Start matching" for likes. Watch the progress bar. Review low-confidence matches, download the not-found list.
-3. **Apple login** — press "1 · Enable Apple access" (auto), paste `media-user-token` from `beta.music.apple.com` cookies (30-sec how-to is on the page), press "Preview" to see counts.
-4. **Transfer** — set playlist name, press "Start transfer" (likes), or "Port ticked playlists" (each Yandex playlist → its own Apple playlist). "Retry failed" and "♥ Add likes only" handle the rest.
+Open `https://your-domain` (or `http://<lan-ip>:8000` for home server). Full guide: [deploy EN](docs/deploy.en.md) / [деплой RU](docs/deploy.ru.md).
 
-No command line needed. Tokens stay in server memory only.
+Verified: image builds, `/api/health` → ok, `/api/session` sets `mtsession` cookie, sessions isolated, wizard served.
 
-## CLI way
+## For visitors (what the service does)
+
+1. **Yandex login** — "Get login code", enter it at `ya.ru/device`, "Export my likes". No token copying.
+2. **Match** — "Load my playlists" to tick chosen ones, or "Start matching" for likes. Progress bar, confidence review, not-found CSV download.
+3. **Apple login** — "1 · Enable Apple access" (auto dev token), paste `media-user-token` (30-sec how-to on page), "Preview" shows counts.
+4. **Transfer** — likes → playlist of your choice; ticked playlists → one Apple playlist each. "Retry failed" and "♥ Add likes only" included.
+
+Tokens never touch disk; idle sessions vanish after 24h.
+
+## Local single-user mode (same as master)
+
+Double-click **`run.bat`** (or `python -m src.web`), open http://127.0.0.1:8000 — same 4-step wizard, data in local `data/`.
+
+### CLI
 
 ```bash
 python -m venv .venv
@@ -30,7 +45,7 @@ python -m src.extract_apple_tokens --save --verify
 python -m src.import_apple --dry-run
 python -m src.import_apple --playlist "YM-port"
 
-# Chosen playlists (NEW)
+# Chosen playlists
 python -m src.export_playlists --list            # show your playlists (kind, title, tracks)
 python -m src.export_playlists --kinds 123,456   # export chosen ones
 python -m src.export_playlists --all             # export every playlist
@@ -107,24 +122,39 @@ run.bat         one-click launcher (Windows)
 
 ---
 
-## RU
+## RU (ветка SaaS)
 
-Перенос лайков **и выбранных плейлистов** из **Яндекс Музыки** в **Apple Music**. Сопоставление с каталогом Apple, импорт в медиатеку + плейлист(ы).
+Самостоятельный веб-сервис: любой по ссылке переносит лайки и плейлисты из **Яндекс Музыки** в **Apple Music** — без аккаунтов и установок. У каждого посетителя изолированная сессия (свои токены только в памяти сервера, своя папка данных, TTL 24ч).
 
-> Стек: **Python CLI + мастер веб-UI** (FastAPI + MusicKit JS). В первую очередь Windows. Вход по коду устройства (без копирования токенов), авто-токен разработчика Apple, фоновые задачи с прогрессом.
+> Ветка `saas` = `master` + многопользовательские сессии + Docker-деплой (app + Caddy с авто-HTTPS). Локальный однопользовательский режим работает как раньше через `run.bat`.
 
-## Быстрый путь (рекомендуется)
+## Деплой (VPS или домашний сервер)
 
-Двойной клик по **`run.bat`** (или `python -m src.web`), открыть http://127.0.0.1:8000 — мастер из 4 шагов проведёт за руку:
+```bash
+git checkout saas
+# прописать свой домен в Caddyfile (VPS) или http://<lan-ip> для домашней сети
+docker compose up -d --build
+docker compose logs -f app
+```
 
-1. **Вход в Яндекс** — «Получить код входа», ввести код на `ya.ru/device`, «Выгрузить мои лайки». Ничего копировать не надо.
-2. **Поиск** — «Загрузить мои плейлисты», отметить нужные, или «Начать поиск» для лайков. Смотреть прогресс-бар. Проверить сомнительные совпадения, скачать список ненайденного.
-3. **Вход в Apple** — «1 · Включить доступ Apple» (автоматом), вставить `media-user-token` из куки `beta.music.apple.com` (инструкция на 30 сек прямо на странице), «Предпросмотр» покажет цифры.
-4. **Перенос** — задать имя плейлиста и «Начать перенос» (лайки) или «Перенести отмеченные плейлисты» (каждый плейлист Яндекса → свой плейлист Apple). «Повторить ошибки» и «♥ Только лайки» доделают остальное.
+Открыть `https://ваш-домен` (или `http://<lan-ip>:8000` дома). Полный гайд: [deploy EN](docs/deploy.en.md) / [деплой RU](docs/deploy.ru.md).
 
-Командная строка не нужна. Токены живут только в памяти сервера.
+Проверено: образ собирается, `/api/health` → ok, `/api/session` ставит куку `mtsession`, сессии изолированы, визард отдаётся.
 
-## Через командную строку
+## Для посетителей (что умеет сервис)
+
+1. **Вход в Яндекс** — «Получить код входа», ввести на `ya.ru/device`, «Выгрузить мои лайки». Ничего копировать не надо.
+2. **Поиск** — «Загрузить мои плейлисты», отметить нужные, или «Начать поиск» для лайков. Прогресс-бар, проверка сомнительных, скачивание ненайденного.
+3. **Вход в Apple** — «1 · Включить доступ Apple» (авто-токен), вставить `media-user-token` (инструкция на 30 сек на странице), «Предпросмотр» покажет цифры.
+4. **Перенос** — лайки → в плейлист с вашим названием; отмеченные плейлисты → по одному плейлисту Apple на каждый. «Повторить ошибки» и «♥ Только лайки» в комплекте.
+
+Токены не пишутся на диск; неактивные сессии исчезают через 24ч.
+
+## Локальный режим (как в master)
+
+Двойной клик по **`run.bat`** (или `python -m src.web`), открыть http://127.0.0.1:8000 — тот же мастер из 4 шагов, данные в локальной `data/`.
+
+### CLI
 
 ```
 [Яндекс: вход по коду устройства] → экспорт лайков / выбранных плейлистов → нормализация → матчинг (iTunes Search API)

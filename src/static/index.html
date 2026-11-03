@@ -106,7 +106,13 @@
   <section class="card" id="s2">
     <h2 data-i18n="s2title">2. Match with Apple catalog</h2>
     <p class="desc" data-i18n="s2desc">We find each track in Apple Music. Takes ~3 sec per track.</p>
+    <div id="plBlock" style="display:none">
+      <b data-i18n="plTitle">Your Yandex playlists</b>
+      <p class="desc" data-i18n="plDesc">Tick playlists to port each into its own Apple playlist.</p>
+      <div id="plList"></div>
+    </div>
     <button class="btn primary" data-i18n="s2run" onclick="matchStart()">Start matching</button>
+    <button class="btn ghost small" data-i18n="loadPl" onclick="loadPlaylists()">Load my playlists</button>
     <progress id="matchProg" value="0" max="100" style="display:none"></progress>
     <div class="status" id="matchStatus"></div>
     <div class="stat-grid" id="matchStats" style="display:none">
@@ -164,6 +170,10 @@
       <button class="btn ghost" data-i18n="retry" onclick="importRetry()">Retry failed</button>
       <button class="btn ghost" data-i18n="favOnly" onclick="favoritesStart()">♥ Add likes only</button>
     </div>
+    <div id="plTransferBox" style="display:none; margin-top:10px">
+      <button class="btn primary" data-i18n="portPl" onclick="playlistsTransfer()">Port ticked playlists</button>
+      <span class="status" id="plTransferStatus"></span>
+    </div>
     <progress id="importProg" value="0" max="100" style="display:none"></progress>
     <div class="status" id="importStatus"></div>
     <pre id="report" style="display:none"></pre>
@@ -193,7 +203,10 @@ var STRINGS = {
     s3paste: 'Paste media-user-token here', save: '2 · Save my key',
     dryRun: 'Preview: what will be added?',
     s4title: '4. Transfer', s4desc: 'Creates a playlist and adds every matched track.',
-    plName: 'Playlist name', startImport: 'Start transfer', retry: 'Retry failed', favOnly: '♥ Add likes only'
+    plName: 'Playlist name', startImport: 'Start transfer', retry: 'Retry failed', favOnly: '♥ Add likes only',
+    portPl: 'Port ticked playlists',
+    plTitle: 'Your Yandex playlists', plDesc: 'Tick playlists to port each into its own Apple playlist.',
+    loadPl: 'Load my playlists'
   },
   ru: {
     tagline: 'Перенос лайков из Яндекс Музыки в Apple Music',
@@ -213,7 +226,10 @@ var STRINGS = {
     s3paste: 'Вставьте сюда media-user-token', save: '2 · Сохранить мой ключ',
     dryRun: 'Предпросмотр: что будет добавлено?',
     s4title: '4. Перенос', s4desc: 'Создаёт плейлист и добавляет все найденные треки.',
-    plName: 'Название плейлиста', startImport: 'Начать перенос', retry: 'Повторить ошибки', favOnly: '♥ Только лайки'
+    plName: 'Название плейлиста', startImport: 'Начать перенос', retry: 'Повторить ошибки', favOnly: '♥ Только лайки',
+    portPl: 'Перенести отмеченные плейлисты',
+    plTitle: 'Ваши плейлисты Яндекса', plDesc: 'Отметьте плейлисты — каждый перенесётся в отдельный плейлист Apple.',
+    loadPl: 'Загрузить мои плейлисты'
   }
 };
 var DONE = { s1: false, s2: false, s3: false, s4: false };
@@ -408,6 +424,52 @@ async function dryRun() {
 /* Step 4: Transfer */
 function playlistPayload() {
   return { playlist: document.getElementById('playlistName').value || 'YM-port' };
+}
+async function tickedKinds() {
+  var kinds = [];
+  document.querySelectorAll('#plList input[type=checkbox]:checked').forEach(function (c) {
+    kinds.push(c.value);
+  });
+  return kinds;
+}
+async function playlistsTransfer() {
+  var kinds = await tickedKinds();
+  if (!kinds.length) { setStatus('plTransferStatus', 'Error: tick at least one', 'err'); return; }
+  setStatus('plTransferStatus', '…');
+  try {
+    var d = await api('/api/playlists/transfer', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kinds: kinds }) });
+    pollJob(d.job_id, 'importProg', 'plTransferStatus', function (res) {
+      var pls = res.playlists || [];
+      var ok = pls.filter(function (p) { return !p.error; }).length;
+      setStatus('plTransferStatus', '✓ ' + ok + ' / ' + pls.length, 'ok');
+      var el = document.getElementById('report');
+      el.style.display = 'block';
+      el.textContent = JSON.stringify(pls, null, 2);
+      markDone('s4');
+    });
+  } catch (e) { setStatus('plTransferStatus', 'Error: ' + e.message, 'err'); }
+}
+async function loadPlaylists() {
+  setStatus('matchStatus', '…');
+  try {
+    var d = await api('/api/yandex/playlists');
+    var box = document.getElementById('plBlock');
+    var list = document.getElementById('plList');
+    box.style.display = 'block';
+    list.innerHTML = '';
+    (d.playlists || []).forEach(function (p) {
+      var label = document.createElement('label');
+      label.style.display = 'block';
+      var cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.value = p.kind; cb.checked = true;
+      label.appendChild(cb);
+      label.appendChild(document.createTextNode(' ' + (p.title || p.kind) + ' (' + (p.track_count || '?') + ')'));
+      list.appendChild(label);
+    });
+    document.getElementById('plTransferBox').style.display = 'block';
+    setStatus('matchStatus', '✓ ' + (d.playlists || []).length, 'ok');
+  } catch (e) { setStatus('matchStatus', 'Error: ' + e.message, 'err'); }
 }
 async function importStart() {
   setStatus('importStatus', '…');

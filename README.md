@@ -1,21 +1,43 @@
 # MTransfer — Yandex Music → Apple Music
 
-One-time migration tool: export your liked tracks from **Yandex Music**, match them against the **Apple Music / iTunes catalog**, and import them into your Apple Music library + playlist.
+**Move your liked tracks AND chosen playlists** from **Yandex Music** to **Apple Music**. Matched against the Apple catalog, imported into your library + playlist(s).
 
-> Stack: **Python CLI + tiny web UI** (FastAPI + MusicKit JS). Windows-compatible. Token/cookie auth (no official Yandex export API, no paid Apple Developer account needed for one-time run).
+> Stack: **Python CLI + web UI wizard** (FastAPI + MusicKit JS). Windows-first. Device-code login (no token pasting), auto Apple developer token, background jobs with progress.
 
 ## Easy way (recommended)
 
 Double-click **`run.bat`** (or `python -m src.web`), open http://127.0.0.1:8000 — a 4-step wizard guides you:
 
 1. **Yandex login** — press "Get login code", enter the code at `ya.ru/device`, press "Export my likes". No token copying.
-2. **Match** — press "Start matching", watch the progress bar. Review low-confidence matches, download the not-found list.
+2. **Match** — press "Load my playlists" to tick chosen playlists, or press "Start matching" for likes. Watch the progress bar. Review low-confidence matches, download the not-found list.
 3. **Apple login** — press "1 · Enable Apple access" (auto), paste `media-user-token` from `beta.music.apple.com` cookies (30-sec how-to is on the page), press "Preview" to see counts.
-4. **Transfer** — set playlist name, press "Start transfer". "Retry failed" and "♥ Add likes only" handle the rest.
+4. **Transfer** — set playlist name, press "Start transfer" (likes), or "Port ticked playlists" (each Yandex playlist → its own Apple playlist). "Retry failed" and "♥ Add likes only" handle the rest.
 
 No command line needed. Tokens stay in server memory only.
 
 ## CLI way
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate        # Windows
+pip install -r requirements.txt
+
+# Likes
+python -m src.yandex_login              # device-code login, saves .yandex_token
+python -m src.export_yandex             # -> data/yandex_favorites.json/.csv
+python -m src.match_apple               # -> matched/unmatched/report
+python -m src.extract_apple_tokens --save --verify
+python -m src.import_apple --dry-run
+python -m src.import_apple --playlist "YM-port"
+
+# Chosen playlists (NEW)
+python -m src.export_playlists --list            # show your playlists (kind, title, tracks)
+python -m src.export_playlists --kinds 123,456   # export chosen ones
+python -m src.export_playlists --all             # export every playlist
+
+# Web UI instead of CLI:
+python -m src.web          # or double-click run.bat -> http://127.0.0.1:8000
+```
 
 ---
 
@@ -24,39 +46,47 @@ No command line needed. Tokens stay in server memory only.
 ### How it works
 
 ```
-[Yandex: OAuth token / cookie] → export likes → normalize → match (iTunes Search API)
-→ [Apple: Developer JWT + Media User Token] → create playlist + add to library → report
+[Yandex: device-code login] → export likes / chosen playlists → normalize → match (iTunes Search API)
+→ [Apple: auto Developer JWT + Media User Token] → create playlist(s) + add to library → report
 ```
 
 Pipeline (same as all proven open-source approaches):
 
-1. **Export** — pull liked tracks from Yandex via unofficial auth (`oauth.yandex.ru` token or logged-in cookie → `api.music.yandex.ru`), save `data/yandex_favorites.json/.csv`.
-2. **Match** — for each track query iTunes Search API / Apple catalog search. Score: ISRC exact (100%) > normalized `artist — title + duration` fuzzy match. Output `matched_tracks.json` / `unmatched_tracks.json` / `migration_report.txt`.
-3. **Import** — frontend authorizes via MusicKit JS `authorize()` (user token), backend uses scraped Developer JWT, then `POST /library/playlists`, add tracks, mark favorites. Playlist name: `Yandex Import YYYY-MM-DD`. Idempotent, resumable, `--dry-run` supported.
+1. **Export** — pull liked tracks (or chosen playlists via `export_playlists`) through device-code login, save `data/yandex_favorites.json/.csv` (playlists → `data/playlists/<kind>_<slug>.{json,csv}`).
+2. **Match** — for each track query iTunes Search API. Score: ISRC exact (100%) > normalized `artist — title + duration` fuzzy match. Output `matched_tracks.json` / `unmatched_tracks.json` / `migration_report.txt`.
+3. **Import** — scraped Developer JWT (auto-refreshed, Origin headers included) + user `media-user-token`, then `POST /library/playlists`, batch track adds, per-track ratings `PUT /v1/me/ratings/songs/{id}`. Idempotent, resumable, `--dry-run` supported.
 
-### Quickstart (planned)
+### Quickstart
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate        # Windows
 pip install -r requirements.txt
 
-set YANDEX_MUSIC_TOKEN=your_token
-python src/export_yandex.py
-python src/match_apple.py
-python src/extract_apple_tokens.py --from-chrome --save
-python src/import_apple.py --dry-run
-python src/import_apple.py --playlist "Yandex Import"
-# or web UI:
-uvicorn src.web:app --reload
+# Likes
+python -m src.yandex_login              # device-code login, saves .yandex_token
+python -m src.export_yandex             # -> data/yandex_favorites.json/.csv
+python -m src.match_apple               # -> matched/unmatched/report
+python -m src.extract_apple_tokens --save --verify
+python -m src.import_apple --dry-run
+python -m src.import_apple --playlist "YM-port"
+
+# Chosen playlists
+python -m src.export_playlists --list            # show your playlists
+python -m src.export_playlists --kinds 123,456   # export chosen ones
+
+# Web UI instead of CLI:
+python -m src.web          # or double-click run.bat -> http://127.0.0.1:8000
 ```
 
-### Layout (planned)
+### Layout
 
 ```
-src/            export_yandex.py, match_apple.py, import_apple.py, extract_apple_tokens.py, web.py
+src/            export_yandex.py, export_playlists.py, yandex_login.py,
+                match_apple.py, import_apple.py, extract_apple_tokens.py, web.py
 docs/           PRD + Implementation plan (EN + RU)
 data/           local only, gitignored — exports, match results, reports
+run.bat         one-click launcher (Windows)
 ```
 
 ### Docs
@@ -79,57 +109,66 @@ data/           local only, gitignored — exports, match results, reports
 
 ## RU
 
-Одноразовый инструмент переноса: выгрузить лайки из **Яндекс Музыки**, сопоставить с каталогом **Apple Music / iTunes** и импортировать в медиатеку + плейлист Apple Music.
+Перенос лайков **и выбранных плейлистов** из **Яндекс Музыки** в **Apple Music**. Сопоставление с каталогом Apple, импорт в медиатеку + плейлист(ы).
 
-> Стек: **Python CLI + крошечный веб-UI** (FastAPI + MusicKit JS). Работает на Windows. Авторизация через токены/куки (официального export API у Яндекса нет, платный Apple Developer для разового переноса не нужен).
+> Стек: **Python CLI + мастер веб-UI** (FastAPI + MusicKit JS). В первую очередь Windows. Вход по коду устройства (без копирования токенов), авто-токен разработчика Apple, фоновые задачи с прогрессом.
 
 ## Быстрый путь (рекомендуется)
 
 Двойной клик по **`run.bat`** (или `python -m src.web`), открыть http://127.0.0.1:8000 — мастер из 4 шагов проведёт за руку:
 
 1. **Вход в Яндекс** — «Получить код входа», ввести код на `ya.ru/device`, «Выгрузить мои лайки». Ничего копировать не надо.
-2. **Поиск** — «Начать поиск», смотреть прогресс-бар. Проверить сомнительные совпадения, скачать список ненайденного.
+2. **Поиск** — «Загрузить мои плейлисты», отметить нужные, или «Начать поиск» для лайков. Смотреть прогресс-бар. Проверить сомнительные совпадения, скачать список ненайденного.
 3. **Вход в Apple** — «1 · Включить доступ Apple» (автоматом), вставить `media-user-token` из куки `beta.music.apple.com` (инструкция на 30 сек прямо на странице), «Предпросмотр» покажет цифры.
-4. **Перенос** — задать имя плейлиста, «Начать перенос». «Повторить ошибки» и «♥ Только лайки» доделают остальное.
+4. **Перенос** — задать имя плейлиста и «Начать перенос» (лайки) или «Перенести отмеченные плейлисты» (каждый плейлист Яндекса → свой плейлист Apple). «Повторить ошибки» и «♥ Только лайки» доделают остальное.
 
 Командная строка не нужна. Токены живут только в памяти сервера.
 
 ## Через командную строку
 
 ```
-[Яндекс: OAuth-токен / cookie] → экспорт лайков → нормализация → матчинг (iTunes Search API)
-→ [Apple: Developer JWT + Media User Token] → создание плейлиста + добавление в библиотеку → отчёт
+[Яндекс: вход по коду устройства] → экспорт лайков / выбранных плейлистов → нормализация → матчинг (iTunes Search API)
+→ [Apple: авто Developer JWT + Media User Token] → создание плейлистов + добавление в библиотеку → отчёт
 ```
 
 Пайплайн (как во всех проверенных open-source решениях):
 
-1. **Экспорт** — забираем лайки из Яндекса через неофициальную авторизацию (токен `oauth.yandex.ru` или cookie залогиненного браузера → `api.music.yandex.ru`), сохраняем `data/yandex_favorites.json/.csv`.
-2. **Матчинг** — каждый трек ищем через iTunes Search API / catalog search Apple. Скоринг: точное совпадение ISRC (100%) > нечёткое сравнение нормализованных `артист — название + длительность`. На выходе `matched_tracks.json` / `unmatched_tracks.json` / `migration_report.txt`.
-3. **Импорт** — фронтенд авторизуется через MusicKit JS `authorize()` (user token), бэкенд использует подсмотренный Developer JWT, затем `POST /library/playlists`, добавление треков, простановка лайков. Плейлист: `Yandex Import YYYY-MM-DD`. Идемпотентно, с resume, есть `--dry-run`.
+1. **Экспорт** — забираем лайки (или выбранные плейлисты через `export_playlists`) после входа по коду, сохраняем `data/yandex_favorites.json/.csv` (плейлисты → `data/playlists/<kind>_<slug>.{json,csv}`).
+2. **Матчинг** — каждый трек ищем через iTunes Search API. Скоринг: точное совпадение ISRC (100%) > нечёткое сравнение нормализованных `артист — название + длительность`. На выходе `matched_tracks.json` / `unmatched_tracks.json` / `migration_report.txt`.
+3. **Импорт** — фронтенд авторизуется через MusicKit JS `authorize()` (user token), бэкенд использует подсмотренный Developer JWT, затем `POST /library/playlists`, добавление треков, простановка лайков. Идемпотентно, с resume, есть `--dry-run`.
 
-### Быстрый старт (план)
+### Быстрый старт
 
 ```bash
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 
-set YANDEX_MUSIC_TOKEN=ваш_токен
-python src/export_yandex.py
-python src/match_apple.py
-python src/extract_apple_tokens.py --from-chrome --save
-python src/import_apple.py --dry-run
-python src/import_apple.py --playlist "Yandex Import"
-# или веб-UI:
-uvicorn src.web:app --reload
+# Лайки
+python -m src.yandex_login              # вход по коду, сохраняет .yandex_token
+python -m src.export_yandex             # -> data/yandex_favorites.json/.csv
+python -m src.match_apple               # -> matched/unmatched/report
+python -m src.extract_apple_tokens --save --verify
+python -m src.import_apple --dry-run
+python -m src.import_apple --playlist "YM-port"
+
+# Выбранные плейлисты (НОВОЕ)
+python -m src.export_playlists --list            # показать плейлисты (kind, название, треки)
+python -m src.export_playlists --kinds 123,456   # выгрузить выбранные
+python -m src.export_playlists --all             # выгрузить все плейлисты
+
+# Или веб-UI вместо CLI:
+python -m src.web          # или двойной клик run.bat -> http://127.0.0.1:8000
 ```
 
-### Структура (план)
+### Структура
 
 ```
-src/            export_yandex.py, match_apple.py, import_apple.py, extract_apple_tokens.py, web.py
+src/            export_yandex.py, export_playlists.py, yandex_login.py,
+                match_apple.py, import_apple.py, extract_apple_tokens.py, web.py
 docs/           PRD + план реализации (EN + RU)
 data/           только локально, в gitignore — выгрузки, результаты матчинга, отчёты
+run.bat         запуск в один клик (Windows)
 ```
 
 ### Документация

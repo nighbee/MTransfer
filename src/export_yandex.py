@@ -43,6 +43,21 @@ def _redact(text: str) -> str:
     return text
 
 
+def _token_from_sources(explicit: str = "") -> str:
+    token = explicit or os.environ.get("YANDEX_MUSIC_TOKEN", "")
+    if not token:
+        # Fall back to the device-flow token file (src.yandex_login --save).
+        for candidate in (".yandex_token",
+                          str(Path(__file__).resolve().parent.parent / ".yandex_token")):
+            try:
+                token = Path(candidate).read_text(encoding="utf-8").strip()
+                if token:
+                    break
+            except OSError:
+                continue
+    return token
+
+
 def _raw_id(raw) -> str:
     if isinstance(raw, dict):
         return str(raw.get("yandex_id") or raw.get("id") or "")
@@ -145,17 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    token = args.token or os.environ.get("YANDEX_MUSIC_TOKEN", "")
-    if not token:
-        # Fall back to the device-flow token file (src.yandex_login --save).
-        for candidate in (".yandex_token",
-                          str(Path(__file__).resolve().parent.parent / ".yandex_token")):
-            try:
-                token = Path(candidate).read_text(encoding="utf-8").strip()
-                if token:
-                    break
-            except OSError:
-                continue
+    token = _token_from_sources(args.token)
     if not token:
         print("Error: no Yandex token. Pass --token, set YANDEX_MUSIC_TOKEN, "
               "or run: python -m src.yandex_login",

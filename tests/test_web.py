@@ -61,6 +61,7 @@ def test_en_ru_strings_both_present(client):
     assert "Match with Apple" in html or "Start matching" in html
     assert "Connect Apple Music" in html
     assert "Transfer" in html
+    assert "playlist" in html.lower()
     # RU strings (JS dict)
     assert "Подключите" in html or "Яндекс" in html
     # Toggle + wizard chrome present
@@ -70,6 +71,8 @@ def test_en_ru_strings_both_present(client):
     assert "pollJob" in html or "/api/jobs/" in html
     assert "unmatched.csv" in html.lower()
     assert 'id="s1"' in html and 'id="s4"' in html
+    assert "/api/yandex/playlists" in html
+    assert "/api/playlists/transfer" in html
 
 
 def test_yandex_test_calls_adapter_mocked(client):
@@ -91,7 +94,8 @@ def test_yandex_test_calls_adapter_mocked(client):
 
 
 def test_yandex_test_missing_token_400(client):
-    r = client.post("/api/yandex/test", json={})
+    with mock.patch.object(webmod, "_yandex_token", return_value=""):
+        r = client.post("/api/yandex/test", json={})
     assert r.status_code == 400
 
 
@@ -203,6 +207,24 @@ def test_import_run_mocked(client):
     m.assert_called_once()
 
 
+def test_yandex_playlists_lists_mocked(client):
+    fake_client = object()
+    with mock.patch.object(webmod.yandex_client, "get_client",
+                           return_value=fake_client), \
+         mock.patch.object(webmod.yandex_client, "list_playlists",
+                           return_value=[{"kind": "1", "title": "Mix",
+                                          "track_count": 3}]):
+        r = client.get("/api/yandex/playlists")
+    assert r.status_code == 200, r.text
+    assert r.json()["playlists"][0]["title"] == "Mix"
+
+
+def test_yandex_playlists_needs_auth(client):
+    with mock.patch.object(webmod, "_yandex_token", return_value=""):
+        r = client.get("/api/yandex/playlists")
+    assert r.status_code == 400
+
+
 def test_import_favorites_job_mocked(client):
     with mock.patch.object(webmod.import_apple, "load_matched_entries",
                            return_value=[{"apple_id": "s1"},
@@ -271,7 +293,7 @@ def test_import_run_mocked(client):
     assert r.status_code == 200
     assert "job_id" in r.json()
     import time as _t
-    for _ in range(50):
+    for _ in range(100):
         _t.sleep(0.05)
         if m.call_count:
             break
@@ -286,13 +308,32 @@ def test_import_retry_mocked(client):
     assert r.status_code == 200
     assert "job_id" in r.json()
     import time as _t
-    for _ in range(50):
+    for _ in range(100):
         _t.sleep(0.05)
         if m.call_count:
             break
     m.assert_called_once()
     _a, kw = m.call_args
     assert kw.get("only_failed") is True
+
+
+def test_playlists_transfer_starts_job(client):
+    with mock.patch.object(webmod, "_run_playlist_job",
+                           return_value=None) as m:
+        r = client.post("/api/playlists/transfer", json={"kinds": ["1", "2"]})
+    assert r.status_code == 200, r.text
+    assert "job_id" in r.json()
+    import time as _t
+    for _ in range(100):
+        _t.sleep(0.05)
+        if m.call_count >= 2:
+            break
+    assert m.call_count == 2
+
+
+def test_playlists_transfer_needs_kinds(client):
+    r = client.post("/api/playlists/transfer", json={})
+    assert r.status_code == 400
 
 
 def test_apple_user_token_memory_only_no_file(client, tmp_path, monkeypatch):

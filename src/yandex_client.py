@@ -21,6 +21,8 @@ __all__ = [
     "iter_liked_raw",
     "fetch_track_details",
     "fetch_tracks_batch",
+    "list_playlists",
+    "fetch_playlist_tracks",
 ]
 
 
@@ -475,3 +477,105 @@ def fetch_track_details(client, raw: Any) -> Track:
         "cover_url": _cover_url(raw),
     }
     return track_from_dict(canonical)
+
+
+# ---------------------------------------------------------------------------
+# Playlists
+# ---------------------------------------------------------------------------
+
+def _playlist_to_dict(pl: Any) -> Dict[str, Any]:
+    if isinstance(pl, dict):
+        return {
+            "kind": pl.get("kind") or pl.get("playlist_id") or pl.get("id"),
+            "title": str(pl.get("title", "") or ""),
+            "track_count": pl.get("track_count") or len(pl.get("tracks", []) or []),
+            "owner": pl.get("owner") or {},
+        }
+    to_dict = getattr(pl, "to_dict", None)
+    if callable(to_dict):
+        try:
+            data = to_dict()
+            if isinstance(data, dict):
+                return {
+                    "kind": data.get("kind"),
+                    "title": str(data.get("title", "") or ""),
+                    "track_count": data.get("track_count", 0),
+                    "owner": data.get("owner") or {},
+                }
+        except Exception:
+            pass
+    return {
+        "kind": getattr(pl, "kind", None),
+        "title": str(getattr(pl, "title", "") or ""),
+        "track_count": getattr(pl, "track_count", 0) or 0,
+        "owner": getattr(pl, "owner", None),
+    }
+
+
+def list_playlists(client) -> List[Dict[str, Any]]:
+    """List the user's own Yandex playlists (kind, title, track_count).
+
+    Auth errors surface as YandexAuthError; other errors raise RuntimeError.
+    """
+    try:
+        method = getattr(client, "users_playlists_list", None)
+        if not callable(method):
+            raise RuntimeError("Yandex client has no users_playlists_list method.")
+        result = method()
+    except YandexAuthError:
+        raise
+    except Exception as exc:
+        if _is_auth_error(exc):
+            raise YandexAuthError(_auth_message()) from None
+        raise RuntimeError(_redact(f"Failed to list playlists: {exc}")) from None
+    items = result if isinstance(result, (list, tuple)) else [result]
+    out = []
+    for pl in items:
+        try:
+            d = _playlist_to_dict(pl)
+        except Exception:
+            continue
+        if d.get("kind") is None:
+            continue
+        d["kind"] = str(d["kind"])
+        out.append(d)
+    return out
+
+
+def fetch_playlist_tracks(client, kind) -> List[Dict[str, Any]]:
+    """Fetch full playlist contents; returns raw track-short items.
+
+    Uses ``users_playlists(kind)`` (owner+kind details) then falls back to
+    ``playlist(uuid)`` when needed. Each item is a TrackShort-like object
+    or dict suitable for :func:`fetch_track_details` / batch enrichment.
+    """
+    kind = str(kind)
+    user_id = getattr(client, "account_uid", None)
+    raw_pl = None
+    try:
+        method = getattr(client, "users_playlists", None)
+        if callable(method):
+            try:
+                raw_pl = method(kind, user_id=user_id) if user_id else method(kind)
+            except TypeError:
+                raw_pl = method(kind)
+    except YandexAuthError:
+        raise
+    except Exception as exc:
+        if _is_auth_error(exc):
+            raise YandexAuthError(_auth_message()) from None
+    if raw_pl is None:
+        try:
+            method = getattr(client, "playlist", None)
+            if callable(method):
+                raw_pl = method(kind)
+        except Exception as exc:
+            if _is_auth_error(exc):
+                raise YandexAuthError(_auth_message()) from None
+            raise RuntimeError(_redact(f"Failed to fetch playlist: {exc}")) from None
+    if raw_pl is None:
+        raise RuntimeError("Could not fetch playlist (no supported method).")
+    tracks = getattr(raw_pl, "tracks", None)
+    if tracks is None and isinstance(raw_pl, dict):
+        tracks = raw_pl.get("tracks", [])
+    return list(tracks or [])

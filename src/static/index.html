@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MTransfer</title>
+<script src="https://js-cdn.music.apple.com/musickit/v3/musickit.js" async></script>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 960px; margin: 0 auto; padding: 16px; }
+  nav button { margin-right: 8px; }
+  section.screen { display: none; border: 1px solid #ccc; border-radius: 8px; padding: 16px; margin-top: 12px; }
+  section.screen.active { display: block; }
+  table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+  th, td { border: 1px solid #ddd; padding: 6px 8px; text-align: left; }
+  tr.conf-high { background: #e6f7e6; }
+  tr.conf-mid { background: #fff8e1; }
+  tr.conf-low { background: #fdecea; }
+  .row { margin: 8px 0; }
+  input[type=password], input[type=text] { width: min(480px, 100%); padding: 6px; }
+  button.primary { padding: 8px 18px; font-size: 1rem; }
+  #status { font-weight: bold; margin: 8px 0; }
+  #langToggle { float: right; }
+  progress { width: 100%; }
+  pre { background: #f6f6f6; padding: 12px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<button id="langToggle" onclick="toggleLang()">RU</button>
+<h1>MTransfer</h1>
+<div id="status" role="status"></div>
+<nav>
+  <button data-i18n="nav1" onclick="show(1)">1. Yandex</button>
+  <button data-i18n="nav2" onclick="show(2)">2. Match</button>
+  <button data-i18n="nav3" onclick="show(3)">3. Apple</button>
+  <button data-i18n="nav4" onclick="show(4)">4. Transfer</button>
+</nav>
+
+<!-- Screen 1: Yandex connect -->
+<section class="screen active" id="s1">
+  <h2 data-i18n="s1title">Connect Yandex</h2>
+  <p data-i18n="s1help">Paste your Yandex OAuth token (oauth.yandex.ru). It stays in memory only.</p>
+  <div class="row">
+    <input type="password" id="ytoken" placeholder="Yandex OAuth token">
+  </div>
+  <div class="row">
+    <button class="primary" data-i18n="test" onclick="yandexTest()">Test</button>
+    <button data-i18n="export" onclick="yandexExport()">Export</button>
+  </div>
+  <p id="yandexCount"></p>
+</section>
+
+<!-- Screen 2: Match -->
+<section class="screen" id="s2">
+  <h2 data-i18n="s2title">Match tracks</h2>
+  <div class="row">
+    <button class="primary" data-i18n="runMatch" onclick="matchRun()">Run matching</button>
+    <a id="unmatchedLink" href="/api/match/unmatched.csv" download="unmatched.csv" data-i18n="dlUnmatched">Download unmatched.csv</a>
+  </div>
+  <p id="matchStatus"></p>
+  <table id="matchTable">
+    <thead><tr><th></th><th data-i18n="colTitle">Title</th><th data-i18n="colArtist">Artist</th><th>Apple ID</th><th data-i18n="colConf">Confidence</th><th data-i18n="colMethod">Method</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="row"><button data-i18n="continue" onclick="show(3)">Continue</button></div>
+</section>
+
+<!-- Screen 3: Apple connect -->
+<section class="screen" id="s3">
+  <h2 data-i18n="s3title">Connect Apple Music</h2>
+  <p data-i18n="s3help">Sign in with Apple Music (MusicKit authorize). The user token is kept in server memory only.</p>
+  <div class="row">
+    <button class="primary" data-i18n="appleSignIn" onclick="appleAuthorize()">Sign in with Apple Music</button>
+    <span id="appleStatus"></span>
+  </div>
+  <div class="row">
+    <button data-i18n="dryRun" onclick="dryRun()">Dry-run</button>
+  </div>
+  <p id="dryRunOut"></p>
+</section>
+
+<!-- Screen 4: Transfer -->
+<section class="screen" id="s4">
+  <h2 data-i18n="s4title">Transfer</h2>
+  <progress id="prog" value="0" max="100"></progress>
+  <div class="row">
+    <button class="primary" data-i18n="startImport" onclick="importRun()">Start import</button>
+    <button data-i18n="retry" onclick="importRetry()">Retry failed</button>
+  </div>
+  <pre id="report"></pre>
+</section>
+
+<script>
+var LANG = 'en';
+var STRINGS = {
+  en: {
+    nav1: '1. Yandex', nav2: '2. Match', nav3: '3. Apple', nav4: '4. Transfer',
+    s1title: 'Connect Yandex', s1help: 'Paste your Yandex OAuth token (oauth.yandex.ru). It stays in memory only.',
+    test: 'Test', export: 'Export',
+    s2title: 'Match tracks', runMatch: 'Run matching', dlUnmatched: 'Download unmatched.csv',
+    colTitle: 'Title', colArtist: 'Artist', colConf: 'Confidence', colMethod: 'Method',
+    continue: 'Continue',
+    s3title: 'Connect Apple Music', s3help: 'Sign in with Apple Music (MusicKit authorize). The user token is kept in server memory only.',
+    appleSignIn: 'Sign in with Apple Music', dryRun: 'Dry-run',
+    s4title: 'Transfer', startImport: 'Start import', retry: 'Retry failed'
+  },
+  ru: {
+    nav1: '1. Яндекс', nav2: '2. Сопоставление', nav3: '3. Apple', nav4: '4. Перенос',
+    s1title: 'Подключить Яндекс', s1help: 'Вставьте OAuth-токен Яндекса (oauth.yandex.ru). Он хранится только в памяти.',
+    test: 'Проверить', export: 'Экспорт',
+    s2title: 'Сопоставить треки', runMatch: 'Запустить сопоставление', dlUnmatched: 'Скачать unmatched.csv',
+    colTitle: 'Название', colArtist: 'Исполнитель', colConf: 'Уверенность', colMethod: 'Метод',
+    continue: 'Продолжить',
+    s3title: 'Подключить Apple Music', s3help: 'Войдите через Apple Music (кнопка MusicKit authorize). Токен хранится только в памяти сервера.',
+    appleSignIn: 'Войти через Apple Music', dryRun: 'Пробный запуск',
+    s4title: 'Перенос', startImport: 'Начать импорт', retry: 'Повторить неудачные'
+  }
+};
+
+function t(key) { return (STRINGS[LANG] && STRINGS[LANG][key]) || STRINGS.en[key] || key; }
+function applyLang() {
+  document.querySelectorAll('[data-i18n]').forEach(function (el) {
+    el.textContent = t(el.getAttribute('data-i18n'));
+  });
+  document.getElementById('langToggle').textContent = LANG === 'en' ? 'RU' : 'EN';
+  document.documentElement.lang = LANG;
+}
+function toggleLang() { LANG = (LANG === 'en') ? 'ru' : 'en'; applyLang(); }
+function show(n) {
+  document.querySelectorAll('section.screen').forEach(function (s) { s.classList.remove('active'); });
+  document.getElementById('s' + n).classList.add('active');
+}
+function setStatus(msg) { document.getElementById('status').textContent = msg; }
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(function () { return {}; });
+  if (!r.ok) throw new Error((body && body.detail) || ('HTTP ' + r.status));
+  return body;
+}
+async function yandexTest() {
+  try {
+    const d = await api('/api/yandex/test', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: document.getElementById('ytoken').value }) });
+    document.getElementById('yandexCount').textContent = (d.count || 0) + ' / ' + t('s1title');
+    setStatus('OK: ' + d.count);
+  } catch (e) { setStatus('Error: ' + e.message); }
+}
+async function yandexExport() {
+  setStatus('…');
+  try {
+    const d = await api('/api/yandex/export', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: document.getElementById('ytoken').value }) });
+    document.getElementById('yandexCount').textContent = d.exported;
+    setStatus('OK: ' + d.exported);
+  } catch (e) { setStatus('Error: ' + e.message); }
+}
+function confClass(c) { c = Number(c) || 0; return c >= 0.85 ? 'conf-high' : (c >= 0.6 ? 'conf-mid' : 'conf-low'); }
+async function matchRun() {
+  document.getElementById('matchStatus').textContent = '…';
+  try {
+    const d = await api('/api/match/run', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    document.getElementById('matchStatus').textContent = (d.matched || 0) + ' / ' + (d.total || 0);
+    await matchResults();
+  } catch (e) { document.getElementById('matchStatus').textContent = 'Error: ' + e.message; }
+}
+async function matchResults() {
+  const d = await api('/api/match/results');
+  const tb = document.querySelector('#matchTable tbody');
+  tb.innerHTML = '';
+  (d.matched || []).forEach(function (m) {
+    const tr = document.createElement('tr');
+    tr.className = confClass(m.confidence);
+    tr.innerHTML = '<td><input type="checkbox" checked></td><td></td><td></td><td></td><td></td><td></td>';
+    tr.children[1].textContent = m.title || m.yandex_id || '';
+    tr.children[2].textContent = (m.artists || []).join(', ');
+    tr.children[3].textContent = m.apple_id || '';
+    tr.children[4].textContent = m.confidence;
+    tr.children[5].textContent = m.method || '';
+    tb.appendChild(tr);
+  });
+  (d.unmatched || []).forEach(function (m) {
+    const tr = document.createElement('tr');
+    tr.className = 'conf-low';
+    tr.innerHTML = '<td><input type="checkbox"></td><td></td><td></td><td></td><td></td><td></td>';
+    tr.children[1].textContent = m.title || m.yandex_id || '';
+    tr.children[2].textContent = (m.artists || []).join(', ');
+    tr.children[3].textContent = '';
+    tr.children[4].textContent = m.confidence || 0;
+    tr.children[5].textContent = m.reason || '';
+    tb.appendChild(tr);
+  });
+}
+async function appleAuthorize() {
+  try {
+    if (typeof MusicKit === 'undefined') throw new Error('MusicKit JS not loaded (offline?)');
+    await MusicKit.configure({ developerToken: '', app: { name: 'MTransfer', build: '0.1' } }).catch(function () {});
+    const music = MusicKit.getInstance();
+    const userToken = await music.authorize();
+    await api('/api/apple/user-token', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: userToken }) });
+    document.getElementById('appleStatus').textContent = 'OK';
+  } catch (e) { document.getElementById('appleStatus').textContent = 'Error: ' + e.message; }
+}
+async function dryRun() {
+  try {
+    const d = await api('/api/import/dry-run', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    document.getElementById('dryRunOut').textContent = JSON.stringify(d);
+  } catch (e) { document.getElementById('dryRunOut').textContent = 'Error: ' + e.message; }
+}
+async function importRun() {
+  try {
+    const d = await api('/api/import/run', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    document.getElementById('prog').value = 100;
+    const r = await api('/api/report');
+    document.getElementById('report').textContent = r.report || JSON.stringify(d);
+  } catch (e) { document.getElementById('report').textContent = 'Error: ' + e.message; }
+}
+async function importRetry() {
+  try {
+    const d = await api('/api/import/retry', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({}) });
+    const r = await api('/api/report');
+    document.getElementById('report').textContent = r.report || JSON.stringify(d);
+  } catch (e) { document.getElementById('report').textContent = 'Error: ' + e.message; }
+}
+applyLang();
+</script>
+</body>
+</html>

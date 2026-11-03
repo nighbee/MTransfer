@@ -1,0 +1,26 @@
+# Secrets — never commit
+.env
+.developer_token
+.media_user_token
+.apple_music_token
+.token
+
+# Local migration data
+data/*
+!data/.gitkeep
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log

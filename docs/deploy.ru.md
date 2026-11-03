@@ -43,6 +43,9 @@ docker compose up -d --build         # передеплой после git pull
 find /var/lib/docker/volumes/mtransfer-data/_data/sessions -maxdepth 1 -mtime +2 -exec rm -rf {} +
 ```
 
+Проверено 2026-11-03: образ собирается, `/api/health` → ok, `/api/session`
+ставит куку `mtsession`, две сессии получают разные id, `/` отдаёт визард.
+
 ## Про безопасность
 
 - HTTPS терминирует Caddy (авто Let's Encrypt на VPS).

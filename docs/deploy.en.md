@@ -43,9 +43,18 @@ docker compose logs -f app           # app logs (tokens are redacted)
 docker compose down                  # stop
 docker compose up -d --build         # redeploy after git pull
 
+# single-container smoke test (no Caddy needed):
+docker build -t mtransfer:saas .
+docker run -d --rm -p 8000:8000 --name mtransfer-smoke mtransfer:saas
+curl http://127.0.0.1:8000/api/health   # {"status":"ok"}
+curl http://127.0.0.1:8000/api/session  # sets mtsession cookie
+
 # prune old session files (older than 2 days), keeps .gitkeep:
 find /var/lib/docker/volumes/mtransfer-data/_data/sessions -maxdepth 1 -mtime +2 -exec rm -rf {} +
 ```
+
+Verified 2026-11-03: image builds, `/api/health` → ok, `/api/session` sets
+`mtsession` cookie, two sessions get distinct ids, `/` serves the wizard.
 
 ## Security notes
 

@@ -39,6 +39,12 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Local .env support (harmless in containers; compose uses environment:).
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(BASE_DIR / ".env")
+    except Exception:
+        pass
     # Periodic session TTL cleanup (hourly).
     stop = threading.Event()
 
@@ -947,4 +953,4 @@ def report(request: Request):
 if __name__ == "__main__":  # pragma: no cover
     import uvicorn
 
-    uvicorn.run("src.web:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run("src.web:app", host="0.0.0.0", port=8000, reload=False)

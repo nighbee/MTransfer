@@ -1,0 +1,9 @@
+# MTransfer SaaS — reverse proxy with automatic HTTPS.
+# Replace `mtransfer.example.com` with your domain (VPS) or your
+# home-server address (e.g. `music.home.arpa` / Tailscale hostname — Caddy
+# will still serve plain HTTP inside a trusted LAN if you remove the
+# `tls` handling by using an `http://` prefix; see notes in docs/deploy.md).
+
+mtransfer.example.com {
+	reverse_proxy app:8000
+}

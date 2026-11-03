@@ -76,6 +76,11 @@
     <button id="langToggle" onclick="toggleLang()">RU</button>
   </header>
 
+  <div class="card active" id="s0" style="margin-bottom:12px">
+    <h2 data-i18n="welcome">Migrate in 4 steps — no accounts, no uploads</h2>
+    <p class="desc" data-i18n="welcomeDesc">Your tokens stay in this server's memory only and vanish after 24h idle. Exports are matched against the Apple catalog, then added to your library.</p>
+  </div>
+
   <div class="steps" id="pills"></div>
 
   <!-- STEP 1: Yandex -->
@@ -187,6 +192,8 @@ var LANG = 'en';
 var STRINGS = {
   en: {
     tagline: 'Move your likes from Yandex Music to Apple Music',
+    welcome: 'Migrate in 4 steps — no accounts, no uploads',
+    welcomeDesc: 'Your tokens stay in this server\u2019s memory only and vanish after 24h idle. Exports are matched against the Apple catalog, then added to your library.',
     steps: ['Yandex login', 'Match', 'Apple login', 'Transfer'],
     s1title: '1. Connect Yandex Music', s1desc: 'No tokens to copy — just confirm a code on Yandex\u2019s site.',
     s1start: 'Get login code', s1instr: 'Open this page and enter the code:',
@@ -210,6 +217,8 @@ var STRINGS = {
   },
   ru: {
     tagline: 'Перенос лайков из Яндекс Музыки в Apple Music',
+    welcome: 'Переезд за 4 шага — без аккаунтов и загрузок файлов',
+    welcomeDesc: 'Ваши токены живут только в памяти этого сервера и исчезают после 24ч простоя. Треки сопоставляются с каталогом Apple и добавляются в вашу медиатеку.',
     steps: ['Вход в Яндекс', 'Поиск', 'Вход в Apple', 'Перенос'],
     s1title: '1. Подключите Яндекс Музыку', s1desc: 'Ничего копировать не надо — просто подтвердите код на сайте Яндекса.',
     s1start: 'Получить код входа', s1instr: 'Откройте эту страницу и введите код:',
@@ -514,6 +523,8 @@ async function showReport(res) {
 }
 renderPills();
 applyLang();
+/* SaaS: ensure a visitor session cookie exists before any step. */
+fetch('/api/session').catch(function () {});
 </script>
 </body>
 </html>

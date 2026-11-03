@@ -23,6 +23,7 @@ import os
 import threading
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,9 +31,28 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 
 from src import export_yandex, extract_apple_tokens, import_apple, match_apple, yandex_client
+from src.sessions import SESSION_COOKIE, SessionStore
 from src.yandex_client import YandexAuthError
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Periodic session TTL cleanup (hourly).
+    stop = threading.Event()
+
+    def _sweep():
+        while not stop.wait(3600):
+            try:
+                SESSIONS.cleanup()
+            except Exception:
+                pass
+
+    t = threading.Thread(target=_sweep, daemon=True)
+    t.start()
+    yield
+    stop.set()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = BASE_DIR / "data"
@@ -48,10 +68,68 @@ JOB_PATH = DATA_DIR / "job.json"
 DEV_TOKEN_PATH = BASE_DIR / ".developer_token"
 
 # In-memory token store only. Never persisted to disk.
+# Legacy global store (single-user fallback); SaaS sessions get their own.
 TOKENS: dict = {}
 _TOKENS = TOKENS  # alias so tests may use either name
 
-app = FastAPI(title="MTransfer")
+SESSIONS = SessionStore(DATA_DIR)
+
+app = FastAPI(title="MTransfer", lifespan=lifespan)
+
+
+def _session_id(request: Request | None) -> str | None:
+    if request is None:
+        return None
+    try:
+        return request.cookies.get(SESSION_COOKIE)
+    except Exception:
+        return None
+
+
+def _sess(request: Request | None):
+    """Session for this visitor; falls back to a transient object wrapping
+    the legacy global TOKENS so old flows keep working without a cookie."""
+    sid = _session_id(request)
+    if sid:
+        return SESSIONS.get_or_create(sid)
+    return None
+
+
+def _sess_tokens(request: Request | None) -> dict:
+    s = _sess(request)
+    if s is not None:
+        return s.tokens
+    return TOKENS
+
+
+def _sess_dir(request: Request | None) -> Path:
+    s = _sess(request)
+    if s is not None and s.data_dir is not None:
+        return s.data_dir
+    return DATA_DIR
+
+
+def _p(name: str, request: Request | None) -> str:
+    return str(_sess_dir(request) / name)
+
+
+def _job_key(request: Request | None) -> str:
+    return _session_id(request) or "global"
+
+
+@app.get("/api/session")
+async def session_new(request: Request):
+    """Issue (or renew) a visitor session cookie."""
+    s = SESSIONS.get_or_create(_session_id(request))
+    # Opportunistic TTL sweep on session churn (cheap, runs rarely).
+    try:
+        SESSIONS.cleanup()
+    except Exception:
+        pass
+    resp = JSONResponse({"session": s.sid})
+    resp.set_cookie(SESSION_COOKIE, s.sid, max_age=24 * 3600,
+                    httponly=True, samesite="lax")
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -71,6 +149,52 @@ class JobState:
 
 JOBS: dict[str, JobState] = {}
 JOBS_LOCK = threading.Lock()
+
+
+def _job_key(request: Request | None) -> str:
+    return _session_id(request) or "global"
+
+
+def _job_new_scoped(request: Request | None, kind: str) -> JobState:
+    """Create a job owned by this visitor's session."""
+    job = JobState(job_id=uuid.uuid4().hex[:12], kind=kind)
+    s = _sess(request)
+    if s is not None:
+        with JOBS_LOCK:
+            s.jobs[job.job_id] = job
+    else:
+        with JOBS_LOCK:
+            JOBS[job.job_id] = job
+    return job
+
+
+def _job_lookup(request: Request | None, job_id: str) -> JobState | None:
+    s = _sess(request)
+    with JOBS_LOCK:
+        if s is not None and job_id in s.jobs:
+            return s.jobs[job_id]
+        return JOBS.get(job_id)
+
+
+def _job_progress_scoped(request: Request | None, job_id: str, done: int, total) -> None:
+    job = _job_lookup(request, job_id)
+    if job is not None:
+        job.done = done
+        job.total = total or 0
+
+
+def _job_finish_scoped(request: Request | None, job_id: str, result: dict) -> None:
+    job = _job_lookup(request, job_id)
+    if job is not None:
+        job.status = "done"
+        job.result = result
+
+
+def _job_fail_scoped(request: Request | None, job_id: str, error: str) -> None:
+    job = _job_lookup(request, job_id)
+    if job is not None:
+        job.status = "error"
+        job.error = error
 
 
 def _job_new(kind: str) -> JobState:
@@ -105,16 +229,15 @@ def _job_fail(job_id: str, error: str) -> None:
 
 
 @app.get("/api/jobs/{job_id}")
-def job_status(job_id: str):
-    with JOBS_LOCK:
-        job = JOBS.get(job_id)
-        if job is None:
-            return JSONResponse({"detail": "unknown job"}, status_code=404)
-        return {
-            "job_id": job.job_id, "kind": job.kind, "status": job.status,
-            "done": job.done, "total": job.total,
-            "result": job.result, "error": job.error,
-        }
+def job_status(job_id: str, request: Request):
+    job = _job_lookup(request, job_id)
+    if job is None:
+        return JSONResponse({"detail": "unknown job"}, status_code=404)
+    return {
+        "job_id": job.job_id, "kind": job.kind, "status": job.status,
+        "done": job.done, "total": job.total,
+        "result": job.result, "error": job.error,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -199,13 +322,18 @@ def health_alias():
 # Yandex: device-code login (no token pasting) + export
 # ---------------------------------------------------------------------------
 
-def _yandex_token() -> str:
+def _yandex_token(request: Request | None = None) -> str:
+    if request is not None:
+        t = _sess_tokens(request)
+        tok = t.get("yandex") or t.get("yandex_token")
+        if tok:
+            return tok
     return (TOKENS.get("yandex") or TOKENS.get("yandex_token")
             or export_yandex._token_from_sources())
 
 
 @app.post("/api/yandex/device/start")
-async def yandex_device_start():
+async def yandex_device_start(request: Request):
     """Step 1: request a device code. User enters it at ya.ru/device."""
     try:
         from yandex_music import Client
@@ -216,15 +344,16 @@ async def yandex_device_start():
     except Exception as exc:
         logger.warning("device code request failed: %s", type(exc).__name__)
         return JSONResponse({"detail": "could not start Yandex login"}, status_code=500)
-    TOKENS["yandex_device_code"] = code.device_code
+    _sess_tokens(request)["yandex_device_code"] = code.device_code
     return {"verification_url": code.verification_url,
             "user_code": code.user_code}
 
 
 @app.post("/api/yandex/device/poll")
-async def yandex_device_poll():
+async def yandex_device_poll(request: Request):
     """Step 2: check whether the user confirmed; store token in memory."""
-    device_code = TOKENS.get("yandex_device_code", "")
+    store = _sess_tokens(request)
+    device_code = store.get("yandex_device_code", "")
     if not device_code:
         return JSONResponse({"detail": "no login started"}, status_code=400)
     try:
@@ -239,9 +368,9 @@ async def yandex_device_poll():
     if token is None:
         return {"confirmed": False}
     access = token.access_token
-    TOKENS["yandex"] = access
-    TOKENS["yandex_token"] = access
-    TOKENS.pop("yandex_device_code", None)
+    store["yandex"] = access
+    store["yandex_token"] = access
+    store.pop("yandex_device_code", None)
     # Resolve login name for a friendly greeting (never log the token).
     try:
         client = yandex_client.get_client(access)
@@ -254,7 +383,7 @@ async def yandex_device_poll():
 @app.post("/api/yandex/test")
 async def yandex_test(request: Request):
     data = _json_body(await _parse_json(request))
-    token = _extract_token(data) or _yandex_token()
+    token = _extract_token(data) or _yandex_token(request)
     if not token:
         return JSONResponse({"detail": "token is required"}, status_code=400)
     try:
@@ -276,15 +405,15 @@ async def yandex_test(request: Request):
         logger.warning("yandex test: fetch failed: %s", type(exc).__name__)
         return JSONResponse({"detail": "yandex fetch failed"}, status_code=500)
     # Memory only — never written to disk, never logged.
-    TOKENS["yandex"] = token
-    TOKENS["yandex_token"] = token
+    _sess_tokens(request)["yandex"] = token
+    _sess_tokens(request)["yandex_token"] = token
     return {"ok": True, "count": count}
 
 
 @app.post("/api/yandex/export")
 async def yandex_export(request: Request):
     data = _json_body(await _parse_json(request))
-    token = _extract_token(data) or _yandex_token()
+    token = _extract_token(data) or _yandex_token(request)
     if not token:
         return JSONResponse({"detail": "token is required"}, status_code=400)
     limit = data.get("limit")
@@ -301,37 +430,39 @@ async def yandex_export(request: Request):
         return JSONResponse({"detail": "yandex client failed"}, status_code=500)
     try:
         tracks = export_yandex.export_likes(client, delay=0, limit=limit)
-        export_yandex.save_tracks(tracks, str(YANDEX_JSON), str(YANDEX_CSV))
+        export_yandex.save_tracks(tracks, _p("yandex_favorites.json", request),
+                                  _p("yandex_favorites.csv", request))
     except YandexAuthError as exc:
         return JSONResponse({"detail": str(exc)}, status_code=401)
     except Exception as exc:
         logger.warning("yandex export failed: %s", type(exc).__name__)
         return JSONResponse({"detail": "yandex export failed"}, status_code=500)
-    TOKENS["yandex"] = token
-    TOKENS["yandex_token"] = token
+    _sess_tokens(request)["yandex"] = token
+    _sess_tokens(request)["yandex_token"] = token
     return {"ok": True, "exported": len(tracks),
-            "json": str(YANDEX_JSON), "csv": str(YANDEX_CSV)}
+            "json": _p("yandex_favorites.json", request),
+            "csv": _p("yandex_favorites.csv", request)}
 
 
 # ---------------------------------------------------------------------------
 # Playlists: list, export chosen, match+import per playlist
 # ---------------------------------------------------------------------------
 
-def _playlist_paths(kind: str, title: str) -> tuple:
+def _playlist_paths(request: Request | None, kind: str, title: str) -> tuple:
     import re as _re
     slug = _re.sub(r"[^\w\s-]", "", title or "", flags=_re.UNICODE).strip()
     slug = _re.sub(r"[\s_-]+", "_", slug)[:60] or "playlist"
-    d = DATA_DIR / "playlists"
+    d = _sess_dir(request) / "playlists"
     d.mkdir(parents=True, exist_ok=True)
-    return (d / f"{kind}_{slug}.json", d / f"{kind}_{slug}.csv",
-            d / f"{kind}_{slug}.matched.json",
-            d / f"{kind}_{slug}.unmatched.json",
-            d / f"{kind}_{slug}.report.txt")
+    return (str(d / f"{kind}_{slug}.json"), str(d / f"{kind}_{slug}.csv"),
+            str(d / f"{kind}_{slug}.matched.json"),
+            str(d / f"{kind}_{slug}.unmatched.json"),
+            str(d / f"{kind}_{slug}.report.txt"))
 
 
 @app.get("/api/yandex/playlists")
-async def yandex_playlists():
-    token = _yandex_token()
+async def yandex_playlists(request: Request):
+    token = _yandex_token(request)
     if not token:
         return JSONResponse({"detail": "connect Yandex first"}, status_code=400)
     try:
@@ -344,47 +475,48 @@ async def yandex_playlists():
         return JSONResponse({"detail": "could not list playlists"}, status_code=500)
 
 
-def _run_playlist_job(job_id: str, kind: str, apple_name: str | None) -> None:
+def _run_playlist_job(request: Request | None, job_id: str, kind: str,
+                      apple_name: str | None) -> None:
     """Full per-playlist pipeline: export -> match -> import into apple_name."""
     from src import export_playlists as _ep
     try:
-        token = _yandex_token()
+        token = _yandex_token(request)
         client = yandex_client.get_client(token)
         playlists = yandex_client.list_playlists(client)
         meta = next((p for p in playlists if str(p["kind"]) == str(kind)), None)
         if meta is None:
-            _job_fail(job_id, f"playlist {kind} not found")
+            _job_fail_scoped(request, job_id, f"playlist {kind} not found")
             return
         title = str(meta.get("title") or kind)
-        fjson, fcsv, fmatched, funmatched, freport = _playlist_paths(kind, title)
+        fjson, fcsv, fmatched, funmatched, freport = _playlist_paths(request, kind, title)
 
         def _ep_prog(done, total):
-            _job_progress(job_id, done, max(1, total or 1) // 3)
+            _job_progress_scoped(request, job_id, done, max(1, total or 1) // 3)
 
         raw_tracks = yandex_client.fetch_playlist_tracks(client, kind)
         tracks = _ep._resolve_tracks(client, raw_tracks, 0.3, 100, _ep_prog)
-        export_yandex.save_tracks(tracks, str(fjson), str(fcsv))
-        _job_progress(job_id, 1, 3)
+        export_yandex.save_tracks(tracks, fjson, fcsv)
+        _job_progress_scoped(request, job_id, 1, 3)
 
         total = len(tracks)
 
         def _m_prog(done, t):
             base = 1 + (2 * done // max(1, t or 1))
-            _job_progress(job_id, base, 3)
+            _job_progress_scoped(request, job_id, base, 3)
 
         summary = match_apple.run(
-            str(fjson), str(fmatched), str(funmatched), str(freport),
-            resume_job=str(DATA_DIR / "playlists" / f"{kind}.job.json"),
+            fjson, fmatched, funmatched, freport,
+            resume_job=str(_sess_dir(request) / "playlists" / f"{kind}.job.json"),
             progress=_m_prog,
         )
-        _job_progress(job_id, 2, 3)
-        dev, user = _import_tokens()
+        _job_progress_scoped(request, job_id, 2, 3)
+        dev, user = _import_tokens(request)
         stats = import_apple.run(
-            str(fmatched), playlist_name=apple_name or title,
+            fmatched, playlist_name=apple_name or title,
             dev_token=dev, user_token=user,
         )
-        _job_progress(job_id, 3, 3)
-        _job_finish(job_id, {
+        _job_progress_scoped(request, job_id, 3, 3)
+        _job_finish_scoped(request, job_id, {
             "title": title, "kind": str(kind), "total": total,
             "matched": summary.get("matched", 0),
             "unmatched": summary.get("unmatched", 0),
@@ -393,10 +525,10 @@ def _run_playlist_job(job_id: str, kind: str, apple_name: str | None) -> None:
             "playlist": stats.get("playlist_name"),
         })
     except YandexAuthError:
-        _job_fail(job_id, "Yandex auth failed — reconnect")
+        _job_fail_scoped(request, job_id, "Yandex auth failed — reconnect")
     except Exception as exc:
         logger.warning("playlist job failed: %s", type(exc).__name__)
-        _job_fail(job_id, "playlist transfer failed")
+        _job_fail_scoped(request, job_id, "playlist transfer failed")
 
 
 @app.post("/api/playlists/transfer")
@@ -407,28 +539,24 @@ async def playlists_transfer(request: Request):
     if not kinds:
         return JSONResponse({"detail": "kinds is required"}, status_code=400)
     apple_prefix = (data.get("apple_prefix") or "").strip()
-    job = _job_new("playlist")
+    job = _job_new_scoped(request, "playlist")
     # Chain kinds sequentially inside one job thread.
     src_kinds = list(kinds)
 
     def _chain():
         results = []
         for i, kind in enumerate(src_kinds):
-            sub_id = f"{job.job_id}-{i}"
-            with JOBS_LOCK:
-                JOBS[sub_id] = JobState(job_id=sub_id, kind="playlist-one")
-            _run_playlist_job(sub_id, kind,
+            _run_playlist_job(request, f"{job.job_id}-{i}", kind,
                               (f"{apple_prefix}{i+1}" if apple_prefix else None))
-            with JOBS_LOCK:
-                sub = JOBS.pop(sub_id, None)
+            sub = _job_lookup(request, f"{job.job_id}-{i}")
             if sub is None:
                 continue
             if sub.status == "error":
                 results.append({"kind": kind, "error": sub.error})
             else:
                 results.append(sub.result)
-            _job_progress(job.job_id, i + 1, len(src_kinds))
-        _job_finish(job.job_id, {"playlists": results})
+            _job_progress_scoped(request, job.job_id, i + 1, len(src_kinds))
+        _job_finish_scoped(request, job.job_id, {"playlists": results})
 
     t = threading.Thread(target=_chain, daemon=True)
     t.start()
@@ -440,6 +568,7 @@ async def playlists_transfer(request: Request):
 # ---------------------------------------------------------------------------
 
 def _run_match_job(job_id: str, limit) -> None:
+    # Legacy single-user path (kept for compat); scoped variant above is used.
     try:
         summary = match_apple.run(
             str(YANDEX_JSON), str(MATCHED_PATH), str(UNMATCHED_PATH),
@@ -467,36 +596,42 @@ async def match_run(request: Request):
         limit = int(limit) if limit is not None else None
     except (TypeError, ValueError):
         limit = None
-    job = _job_new("match")
+    job = _job_new_scoped(request, "match")
     run_fn = match_apple.run  # bind now: tests patch this before POST
     t = threading.Thread(
-        target=_run_match_bound, args=(job.job_id, run_fn, limit), daemon=True)
+        target=_run_match_bound,
+        args=(request, job.job_id, run_fn, limit), daemon=True)
     t.start()
     return {"job_id": job.job_id}
 
 
-def _run_match_bound(job_id: str, run_fn, limit) -> None:
+def _run_match_bound(request: Request | None, job_id: str, run_fn, limit) -> None:
     try:
         summary = run_fn(
-            str(YANDEX_JSON), str(MATCHED_PATH), str(UNMATCHED_PATH),
-            str(REPORT_PATH), limit=limit, resume_job=str(JOB_PATH),
-            progress=lambda done, total: _job_progress(job_id, done, total),
+            _p("yandex_favorites.json", request),
+            _p("matched_tracks.json", request),
+            _p("unmatched_tracks.json", request),
+            _p("migration_report.txt", request),
+            limit=limit,
+            resume_job=_p("job.json", request),
+            progress=lambda done, total: _job_progress_scoped(
+                request, job_id, done, total),
         )
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
-            if job is not None:
-                job.done = summary.get("total", 0)
-                job.total = summary.get("total", 0)
-        _job_finish(job_id, summary)
+        job = _job_lookup(request, job_id)
+        if job is not None:
+            job.done = summary.get("total", 0)
+            job.total = summary.get("total", 0)
+        _job_finish_scoped(request, job_id, summary)
     except Exception as exc:
         logger.warning("match job failed: %s", type(exc).__name__)
-        _job_fail(job_id, "match failed")
+        _job_fail_scoped(request, job_id, "match failed")
 
 
 @app.get("/api/match/results")
-def match_results():
-    matched = _read_json_list(MATCHED_PATH)
-    unmatched = _read_json_list(UNMATCHED_PATH)
+def match_results(request: Request):
+    d = _sess_dir(request)
+    matched = _read_json_list(d / "matched_tracks.json")
+    unmatched = _read_json_list(d / "unmatched_tracks.json")
     return {
         "matched": matched,
         "unmatched": unmatched,
@@ -507,8 +642,8 @@ def match_results():
 
 
 @app.get("/api/match/unmatched.csv", include_in_schema=False)
-def match_unmatched_csv():
-    unmatched = _read_json_list(UNMATCHED_PATH)
+def match_unmatched_csv(request: Request):
+    unmatched = _read_json_list(_sess_dir(request) / "unmatched_tracks.json")
     buf = io.StringIO()
     writer = csv.DictWriter(buf, fieldnames=["yandex_id", "title", "artists",
                                              "duration_ms", "isrc", "reason",
@@ -539,11 +674,10 @@ def match_unmatched_csv():
 # ---------------------------------------------------------------------------
 
 @app.get("/api/apple/dev-token/status")
-def dev_token_status():
-    present = False
-    if TOKENS.get("dev"):
-        present = True
-    else:
+def dev_token_status(request: Request):
+    store = _sess_tokens(request)
+    present = bool(store.get("dev"))
+    if not present:
         try:
             extract_apple_tokens.load_token(str(DEV_TOKEN_PATH))
             present = True
@@ -553,15 +687,15 @@ def dev_token_status():
 
 
 @app.post("/api/apple/dev-token/refresh")
-async def dev_token_refresh():
+async def dev_token_refresh(request: Request):
     """One click: scrape the web dev-token and keep it in memory."""
     try:
         jwt = extract_apple_tokens.fetch_developer_token_from_web()
     except Exception as exc:
         logger.warning("dev token refresh failed: %s", type(exc).__name__)
         return JSONResponse({"detail": "could not fetch developer token"}, status_code=500)
-    TOKENS["dev"] = jwt
-    TOKENS["dev_token"] = jwt
+    _sess_tokens(request)["dev"] = jwt
+    _sess_tokens(request)["dev_token"] = jwt
     return {"ok": True, "present": True}
 
 
@@ -572,10 +706,10 @@ async def apple_user_token(request: Request):
     if not token:
         return JSONResponse({"detail": "token is required"}, status_code=400)
     # Memory only: never written to disk, never logged.
-    TOKENS["user"] = token
-    TOKENS["user_token"] = token
+    _sess_tokens(request)["user"] = token
+    _sess_tokens(request)["user_token"] = token
     # Friendly check: resolve the storefront to prove the combo works.
-    dev = _import_tokens()[0]
+    dev = _import_tokens(request)[0]
     storefront = ""
     if dev:
         try:
@@ -589,18 +723,22 @@ async def apple_user_token(request: Request):
 # Import (background job with progress)
 # ---------------------------------------------------------------------------
 
-def _import_tokens() -> tuple:
-    dev = TOKENS.get("dev") or TOKENS.get("dev_token")
+def _import_tokens(request: Request | None = None) -> tuple:
+    store = _sess_tokens(request) if request is not None else TOKENS
+    dev = store.get("dev") or store.get("dev_token")
     if not dev:
         try:
             dev = extract_apple_tokens.load_token(str(DEV_TOKEN_PATH))
         except Exception:
             dev = None
-    user = TOKENS.get("user") or TOKENS.get("user_token")
+    user = store.get("user") or store.get("user_token")
+    if not user and request is None:
+        user = TOKENS.get("user") or TOKENS.get("user_token")
     return dev, user
 
 
-def _run_import_job(job_id: str, matched, playlist, dry_run, from_n, only_failed,
+def _run_import_job(request: Request | None, job_id: str, matched, playlist,
+                    dry_run, from_n, only_failed,
                     favorites_only: bool = False,
                     dev=None, user=None, token_snapshot: dict | None = None) -> None:
     try:
@@ -609,14 +747,14 @@ def _run_import_job(job_id: str, matched, playlist, dry_run, from_n, only_failed
                 dev = dev or token_snapshot.get("dev") or token_snapshot.get("dev_token")
                 user = user or token_snapshot.get("user") or token_snapshot.get("user_token")
             if dev is None or user is None:
-                dev, user = _import_tokens()
+                dev, user = _import_tokens(request)
         if favorites_only:
             # Favorites-only pass: apply ratings for every matched id.
             entries = import_apple.load_matched_entries(matched)
             ids = [import_apple._entry_apple_id(e) for e in entries]
             ids = [i for i in ids if i]
             total = len(ids)
-            _job_progress(job_id, 0, total)
+            _job_progress_scoped(request, job_id, 0, total)
             res = {"added": [], "failed": []}
             BATCH = 25
             for start in range(0, len(ids), BATCH):
@@ -624,34 +762,36 @@ def _run_import_job(job_id: str, matched, playlist, dry_run, from_n, only_failed
                 part = import_apple.set_favorites(dev, user, chunk)
                 res["added"].extend(part.get("added", []))
                 res["failed"].extend(part.get("failed", []))
-                _job_progress(job_id, len(res["added"]) + len(res["failed"]), total)
-            _job_finish(job_id, {"favorites_set": len(res["added"]),
-                                 "failed": res["failed"], "total": total})
+                _job_progress_scoped(request, job_id,
+                                     len(res["added"]) + len(res["failed"]), total)
+            _job_finish_scoped(request, job_id, {"favorites_set": len(res["added"]),
+                                                 "failed": res["failed"], "total": total})
             return
         stats = import_apple.run(
             matched, playlist_name=playlist, dry_run=dry_run, from_n=from_n,
             only_failed=only_failed, dev_token=dev, user_token=user,
         )
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
-            if job is not None:
-                total = stats.get("total", 0) or stats.get("considered", 0)
-                job.done = stats.get("imported", 0) + stats.get("skipped", 0)
-                job.total = total
-        _job_finish(job_id, stats)
+        job = _job_lookup(request, job_id)
+        if job is not None:
+            total = stats.get("total", 0) or stats.get("considered", 0)
+            job.done = stats.get("imported", 0) + stats.get("skipped", 0)
+            job.total = total
+        _job_finish_scoped(request, job_id, stats)
     except FileNotFoundError as exc:
-        _job_fail(job_id, f"matched file not found: {exc.filename or matched}")
+        _job_fail_scoped(request, job_id,
+                         f"matched file not found: {exc.filename or matched}")
     except Exception as exc:
         logger.warning("import job failed: %s", type(exc).__name__)
-        _job_fail(job_id, "import failed")
+        _job_fail_scoped(request, job_id, "import failed")
 
 
 @app.post("/api/import/dry-run")
 async def import_dry_run(request: Request):
     data = _json_body(await _parse_json(request))
-    matched = data.get("matched_json") or data.get("matched") or str(MATCHED_PATH)
+    matched = data.get("matched_json") or data.get("matched") or _p(
+        "matched_tracks.json", request)
     playlist = data.get("playlist") or data.get("playlist_name")
-    dev, user = _import_tokens()
+    dev, user = _import_tokens(request)
     try:
         stats = import_apple.run(
             matched, playlist_name=playlist, dry_run=True,
@@ -666,8 +806,10 @@ async def import_dry_run(request: Request):
     return stats
 
 
-def _start_import_job(data: dict, only_failed=False, favorites_only=False):
-    matched = data.get("matched_json") or data.get("matched") or str(MATCHED_PATH)
+def _start_import_job(request: Request, data: dict, only_failed=False,
+                      favorites_only=False):
+    matched = data.get("matched_json") or data.get("matched") or _p(
+        "matched_tracks.json", request)
     playlist = data.get("playlist") or data.get("playlist_name")
     from_n = data.get("from_n", data.get("from", 0))
     try:
@@ -675,18 +817,18 @@ def _start_import_job(data: dict, only_failed=False, favorites_only=False):
     except (TypeError, ValueError):
         from_n = 0
     kind = "favorites" if favorites_only else ("retry" if only_failed else "import")
-    job = _job_new(kind)
+    job = _job_new_scoped(request, kind)
     # Bind run + tokens NOW (request context): background threads must not rely
     # on test mocks applied after the response is returned.
     run_fn = import_apple.run
     fav_fn = import_apple.set_favorites
     load_fn = import_apple.load_matched_entries
     entry_fn = import_apple._entry_apple_id
-    dev, user = _import_tokens()
-    snapshot = dict(TOKENS)
+    dev, user = _import_tokens(request)
+    snapshot = dict(_sess_tokens(request))
     t = threading.Thread(
         target=_run_import_bound,
-        args=(job.job_id, run_fn, fav_fn, load_fn, entry_fn,
+        args=(request, job.job_id, run_fn, fav_fn, load_fn, entry_fn,
               matched, playlist, False, from_n, only_failed,
               favorites_only, dev, user, snapshot),
         daemon=True,
@@ -695,7 +837,8 @@ def _start_import_job(data: dict, only_failed=False, favorites_only=False):
     return {"job_id": job.job_id}
 
 
-def _run_import_bound(job_id: str, run_fn, fav_fn, load_fn, entry_fn,
+def _run_import_bound(request: Request | None, job_id: str, run_fn, fav_fn,
+                      load_fn, entry_fn,
                       matched, playlist, dry_run, from_n, only_failed,
                       favorites_only: bool = False,
                       dev=None, user=None, token_snapshot: dict | None = None) -> None:
@@ -710,7 +853,7 @@ def _run_import_bound(job_id: str, run_fn, fav_fn, load_fn, entry_fn,
             ids = [entry_fn(e) for e in entries]
             ids = [i for i in ids if i]
             total = len(ids)
-            _job_progress(job_id, 0, total)
+            _job_progress_scoped(request, job_id, 0, total)
             res = {"added": [], "failed": []}
             BATCH = 25
             for start in range(0, len(ids), BATCH):
@@ -718,44 +861,45 @@ def _run_import_bound(job_id: str, run_fn, fav_fn, load_fn, entry_fn,
                 part = fav_fn(dev, user, chunk)
                 res["added"].extend(part.get("added", []))
                 res["failed"].extend(part.get("failed", []))
-                _job_progress(job_id, len(res["added"]) + len(res["failed"]), total)
-            _job_finish(job_id, {"favorites_set": len(res["added"]),
-                                 "failed": res["failed"], "total": total})
+                _job_progress_scoped(request, job_id,
+                                     len(res["added"]) + len(res["failed"]), total)
+            _job_finish_scoped(request, job_id, {"favorites_set": len(res["added"]),
+                                                 "failed": res["failed"], "total": total})
             return
         stats = run_fn(
             matched, playlist_name=playlist, dry_run=dry_run, from_n=from_n,
             only_failed=only_failed, dev_token=dev, user_token=user,
         )
-        with JOBS_LOCK:
-            job = JOBS.get(job_id)
-            if job is not None:
-                total = stats.get("total", 0) or stats.get("considered", 0)
-                job.done = stats.get("imported", 0) + stats.get("skipped", 0)
-                job.total = total
-        _job_finish(job_id, stats)
+        job = _job_lookup(request, job_id)
+        if job is not None:
+            total = stats.get("total", 0) or stats.get("considered", 0)
+            job.done = stats.get("imported", 0) + stats.get("skipped", 0)
+            job.total = total
+        _job_finish_scoped(request, job_id, stats)
     except FileNotFoundError as exc:
-        _job_fail(job_id, f"matched file not found: {exc.filename or matched}")
+        _job_fail_scoped(request, job_id,
+                         f"matched file not found: {exc.filename or matched}")
     except Exception as exc:
         logger.warning("import job failed: %s", type(exc).__name__)
-        _job_fail(job_id, "import failed")
+        _job_fail_scoped(request, job_id, "import failed")
 
 
 @app.post("/api/import/run")
 async def import_run(request: Request):
-    return _start_import_job(_json_body(await _parse_json(request)))
+    return _start_import_job(request, _json_body(await _parse_json(request)))
 
 
 @app.post("/api/import/retry")
 async def import_retry(request: Request):
     data = _json_body(await _parse_json(request))
-    return _start_import_job(data, only_failed=True)
+    return _start_import_job(request, data, only_failed=True)
 
 
 @app.post("/api/import/favorites")
 async def import_favorites(request: Request):
     """Favorites-only pass (ratings), no playlist touched."""
     data = _json_body(await _parse_json(request))
-    return _start_import_job(data, favorites_only=True)
+    return _start_import_job(request, data, favorites_only=True)
 
 
 # ---------------------------------------------------------------------------
@@ -763,27 +907,32 @@ async def import_favorites(request: Request):
 # ---------------------------------------------------------------------------
 
 @app.get("/api/progress")
-def progress():
+def progress(request: Request):
     """One-shot status snapshot for the wizard header: export/match/import."""
+    d = _sess_dir(request)
     with JOBS_LOCK:
+        s = _sess(request)
+        scoped = list(s.jobs.values()) if s is not None else []
+        glob = list(JOBS.values())
         jobs = [
             {"job_id": j.job_id, "kind": j.kind, "status": j.status,
              "done": j.done, "total": j.total}
-            for j in JOBS.values()
+            for j in (scoped + glob)
         ]
     return {
-        "exported": len(_read_json_list(YANDEX_JSON)),
-        "matched": len(_read_json_list(MATCHED_PATH)),
-        "unmatched": len(_read_json_list(UNMATCHED_PATH)),
+        "exported": len(_read_json_list(d / "yandex_favorites.json")),
+        "matched": len(_read_json_list(d / "matched_tracks.json")),
+        "unmatched": len(_read_json_list(d / "unmatched_tracks.json")),
         "jobs": jobs[-5:],
     }
 
 
 @app.get("/api/report")
-def report():
-    text = _read_text(REPORT_PATH)
-    matched = _read_json_list(MATCHED_PATH)
-    unmatched = _read_json_list(UNMATCHED_PATH)
+def report(request: Request):
+    d = _sess_dir(request)
+    text = _read_text(d / "migration_report.txt")
+    matched = _read_json_list(d / "matched_tracks.json")
+    unmatched = _read_json_list(d / "unmatched_tracks.json")
     imported = 0
     # Best-effort: derive imported count from matched when no import ran yet.
     return {

@@ -1,0 +1,46 @@
+services:
+  app:
+    build: .
+    # Local dev: single app on :8000
+    # ports:
+    #   - "8000:8000"
+    expose:
+      - "8000"
+    volumes:
+      # Persist exports/matches per container lifetime (sessions TTL-clean
+      # themselves in memory after 24h idle; files stay until volume pruned).
+      - mtransfer-data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+      # Offered CPU/RAM caps for a small VPS — tune to your box.
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    restart: unless-stopped
+    networks:
+      - web
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - app
+    restart: unless-stopped
+    networks:
+      - web
+
+volumes:
+  mtransfer-data:
+  caddy-data:
+  caddy-config:
+
+networks:
+  web:

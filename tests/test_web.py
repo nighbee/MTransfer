@@ -73,6 +73,8 @@ def test_en_ru_strings_both_present(client):
     assert 'id="s1"' in html and 'id="s4"' in html
     assert "/api/yandex/playlists" in html
     assert "/api/playlists/transfer" in html
+    # SaaS landing: welcome block + session bootstrap
+    assert "/api/session" in html
 
 
 def test_yandex_test_calls_adapter_mocked(client):
@@ -247,17 +249,43 @@ def test_import_favorites_job_mocked(client):
         assert body["result"]["favorites_set"] == 2
 
 
+def test_session_isolation_between_visitors(client):
+    # two visitors: separate tokens, separate data, separate jobs.
+    # NOTE: TestClient persists cookies, so clear them between visitors.
+    client.cookies.clear()
+    r1 = client.get("/api/session")
+    sid1 = r1.json()["session"]
+    client.cookies.clear()
+    r2 = client.get("/api/session")
+    sid2 = r2.json()["session"]
+    assert sid1 != sid2
+    s1 = webmod.SESSIONS.get(sid1)
+    s2 = webmod.SESSIONS.get(sid2)
+    s1.tokens["yandex"] = "TOKEN_A"
+    assert "yandex" not in s2.tokens
+    assert s1.data_dir != s2.data_dir
+    assert s1.data_dir.exists() and s2.data_dir.exists()
+
+
+def test_session_endpoint_sets_cookie(client):
+    r = client.get("/api/session")
+    assert r.status_code == 200
+    assert "session" in r.json()
+    assert webmod.SESSION_COOKIE in r.headers.get("set-cookie", "")
+
+
 def test_match_results_reads_files(client, tmp_path, monkeypatch):
+    # isolated session: fresh cookie -> own empty data dir, then seed it
+    r0 = client.get("/api/session")
+    sid = r0.json()["session"]
+    sdir = webmod.SESSIONS.get(sid).data_dir
     matched = [{"yandex_id": "y1", "apple_id": "s1",
                 "confidence": 0.97, "method": "isrc"}]
     unmatched = [{"yandex_id": "y2", "title": "Nope", "artists": ["Nobody"],
                   "reason": "no_candidates", "confidence": 0.0}]
-    mp = tmp_path / "matched_tracks.json"
-    up = tmp_path / "unmatched_tracks.json"
-    mp.write_text(json.dumps(matched), encoding="utf-8")
-    up.write_text(json.dumps(unmatched), encoding="utf-8")
-    monkeypatch.setattr(webmod, "MATCHED_PATH", mp)
-    monkeypatch.setattr(webmod, "UNMATCHED_PATH", up)
+    (sdir / "matched_tracks.json").write_text(json.dumps(matched), encoding="utf-8")
+    (sdir / "unmatched_tracks.json").write_text(json.dumps(unmatched), encoding="utf-8")
+    client.cookies.set(webmod.SESSION_COOKIE, sid)
     r = client.get("/api/match/results")
     assert r.status_code == 200, r.text
     body = r.json()
@@ -384,15 +412,16 @@ def test_dev_token_status_endpoint(client, tmp_path, monkeypatch):
 
 
 def test_report_endpoint(client, tmp_path, monkeypatch):
-    rp = tmp_path / "migration_report.txt"
-    mp = tmp_path / "matched_tracks.json"
-    up = tmp_path / "unmatched_tracks.json"
-    rp.write_text("Migration report\ntotal: 2\n", encoding="utf-8")
-    mp.write_text(json.dumps([{"yandex_id": "y1"}]), encoding="utf-8")
-    up.write_text(json.dumps([{"yandex_id": "y2"}]), encoding="utf-8")
-    monkeypatch.setattr(webmod, "REPORT_PATH", rp)
-    monkeypatch.setattr(webmod, "MATCHED_PATH", mp)
-    monkeypatch.setattr(webmod, "UNMATCHED_PATH", up)
+    r0 = client.get("/api/session")
+    sid = r0.json()["session"]
+    sdir = webmod.SESSIONS.get(sid).data_dir
+    (sdir / "migration_report.txt").write_text(
+        "Migration report\ntotal: 2\n", encoding="utf-8")
+    (sdir / "matched_tracks.json").write_text(
+        json.dumps([{"yandex_id": "y1"}]), encoding="utf-8")
+    (sdir / "unmatched_tracks.json").write_text(
+        json.dumps([{"yandex_id": "y2"}]), encoding="utf-8")
+    client.cookies.set(webmod.SESSION_COOKIE, sid)
     r = client.get("/api/report")
     assert r.status_code == 200
     body = r.json()

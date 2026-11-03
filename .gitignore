@@ -10,6 +10,7 @@
 # Local migration data
 data/*
 !data/.gitkeep
+!data/sessions/.gitkeep
 
 # Python
 .venv/
